@@ -2,6 +2,8 @@
 // Strategy: "stale-while-revalidate" — show the saved copy instantly, then quietly
 // download a fresh copy in the background. After you publish an update, it shows up
 // the *second* time you open the app. No version numbers to bump.
+// (v2: always double-checks with GitHub for a newer file instead of trusting the
+// browser's short-term cache, so updates show up within a couple of opens.)
 
 const CACHE = 'tracker-app';
 const FILES = [
@@ -16,7 +18,11 @@ const FILES = [
 ];
 
 self.addEventListener('install', (event) => {
-  event.waitUntil(caches.open(CACHE).then((c) => c.addAll(FILES)).then(() => self.skipWaiting()));
+  event.waitUntil(
+    caches.open(CACHE)
+      .then((c) => c.addAll(FILES.map((f) => new Request(f, { cache: 'reload' }))))
+      .then(() => self.skipWaiting())
+  );
 });
 
 self.addEventListener('activate', (event) => {
@@ -31,7 +37,7 @@ self.addEventListener('fetch', (event) => {
   const req = event.request;
   if (req.method !== 'GET' || new URL(req.url).origin !== self.location.origin) return;
 
-  const fresh = fetch(req)
+  const fresh = fetch(req, { cache: 'no-cache' })
     .then((res) => {
       if (res && res.ok) {
         const copy = res.clone();

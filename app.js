@@ -1,19 +1,34 @@
 'use strict';
 /* =====================================================================
-   Goals & Training Tracker — version 1
+   Goals & Training Tracker — version 2
    Everything is stored on this device (browser "localStorage").
    Sections:  1 settings · 2 helpers · 3 storage · 4 plan import
-              5 training · 6 rest timer · 7 checklist · 8 to-do
-              9 more/backup · 10 drawing & events
+              5 training · 6 cardio · 7 rest timer · 8 checklist
+              9 goals & to-do · 10 progress & weekly check-in
+              11 more/backup · 12 drawing & events
    ===================================================================== */
 
 /* ---------- 1. Settings ---------- */
-const APP_VERSION = '1.0.0';
-const STORE_KEY = 'tracker.data.v1';
+const APP_VERSION = '2.0.0';
+const STORE_KEY = 'tracker.data.v1'; // (name kept from v1 so your data carries over)
 const UI_KEY = 'tracker.ui.v1';
 const BACKUP_KEY = 'tracker.lastBackup';
+const TABS = ['train', 'check', 'goals', 'progress', 'more'];
 const CATEGORIES = ['Training', 'School', 'Work', 'Side projects', 'Personal'];
 const TARGETS = { steps: 10000, protein: 160, proteinMin: 130, calories: 2500, caloriesLow: 2300 };
+const CARDIO_TYPES = [
+  { id: 'bike', label: 'Bike', ico: '🚴' },
+  { id: 'row', label: 'Row', ico: '🚣' },
+  { id: 'swim', label: 'Swim', ico: '🏊' },
+  { id: 'walk', label: 'Walk', ico: '🚶' },
+  { id: 'other', label: 'Other', ico: '➕' },
+];
+const DIST_UNITS = ['mi', 'km', 'yd', 'm'];
+const GOAL_KINDS = {
+  count: { label: 'Count times (tap +1)', unit: 'times' },
+  minutes: { label: 'Minutes (tap +15, +30…)', unit: 'min' },
+  workouts: { label: 'Workout days (counts itself from your logs)', unit: 'days' },
+};
 
 /* ---------- 2. Helpers ---------- */
 const $ = (sel) => document.querySelector(sel);
@@ -29,7 +44,11 @@ const addDays = (k, n) => { const d = fromKey(k); d.setDate(d.getDate() + n); re
 const isDateKey = (s) => typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s) && toKey(fromKey(s)) === s;
 const niceDate = (k) => { const d = fromKey(k); return `${DOW[d.getDay()]} ${MON[d.getMonth()]} ${d.getDate()}`; };
 const shortDate = (k) => { const d = fromKey(k); return `${MON[d.getMonth()]} ${d.getDate()}`; };
+const dayName = (k) => DOW[fromKey(k).getDay()];
 const relDay = (k) => (k === todayKey() ? 'today' : k === addDays(todayKey(), -1) ? 'yesterday' : niceDate(k));
+// Weeks run Monday → Sunday (same as your coach's plans).
+const mondayOf = (k) => addDays(k, -((fromKey(k).getDay() + 6) % 7));
+const weekDates = (mon) => [0, 1, 2, 3, 4, 5, 6].map((i) => addDays(mon, i));
 
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
@@ -40,10 +59,13 @@ const fmtSec = (s) => { s = Math.max(0, Math.round(s)); return `${Math.floor(s /
 const fmtNum = (n) => (Number.isInteger(n) ? String(n) : String(Math.round(n * 10) / 10));
 const num = (v) => { if (v === '' || v === null || v === undefined) return null; const n = Number(v); return Number.isFinite(n) ? n : null; };
 const show = (v) => (v === undefined ? 'nothing' : String(JSON.stringify(v)).slice(0, 40));
+const sum = (arr) => arr.reduce((a, b) => a + b, 0);
+const plural = (n, word) => `${fmtNum(n)} ${word}${n === 1 ? '' : 's'}`;
+const painColor = (n) => `hsl(${140 - (n - 1) * 15} 70% 55%)`;
 
 /* ---------- 3. Storage ---------- */
 function blankData() {
-  return { app: 'goal-tracker', version: 1, plans: {}, sets: [], daily: {}, todos: [] };
+  return { app: 'goal-tracker', version: 2, plans: {}, sets: [], cardio: [], daily: {}, todos: [], goals: [] };
 }
 // Cleans up data loaded from storage or a backup file so a bad entry can't crash the app.
 function normalizeData(d) {
@@ -56,8 +78,14 @@ function normalizeData(d) {
     }
   }
   if (Array.isArray(d.sets)) out.sets = d.sets.filter((s) => isObj(s) && isDateKey(s.date) && typeof s.exercise === 'string');
+  if (Array.isArray(d.cardio)) out.cardio = d.cardio.filter((c) => isObj(c) && isDateKey(c.date) && typeof c.type === 'string');
   if (isObj(d.daily)) out.daily = d.daily;
   if (Array.isArray(d.todos)) out.todos = d.todos.filter((t) => isObj(t) && typeof t.text === 'string' && isDateKey(t.date));
+  if (Array.isArray(d.goals)) {
+    out.goals = d.goals
+      .filter((g) => isObj(g) && g.id && typeof g.title === 'string' && GOAL_KINDS[g.kind] && Number(g.target) > 0)
+      .map((g) => ({ ...g, log: isObj(g.log) ? g.log : {} }));
+  }
   return out;
 }
 function loadData() {
@@ -79,11 +107,16 @@ function save() {
   }
 }
 
-// Small things about the screen itself (which tab is open, the running timer).
-const ui = { tab: 'train', planWeek: null, trainDate: null, openEx: null, checkDate: null, todoFilter: 'All', todoCat: 'Personal', planDraft: '' };
+// Small things about the screen itself (which tab is open, open forms, the running timer).
+const ui = {
+  tab: 'train', planWeek: null, trainDate: null, openEx: null, checkDate: null,
+  todoFilter: 'All', todoCat: 'Personal', planDraft: '',
+  cardioForm: null, goalForm: null, sumWeek: null,
+};
 let savedUi = {};
 try { savedUi = JSON.parse(localStorage.getItem(UI_KEY)) || {}; } catch (e) { savedUi = {}; }
-if (['train', 'check', 'todo', 'more'].includes(savedUi.tab)) ui.tab = savedUi.tab;
+if (savedUi.tab === 'todo') savedUi.tab = 'goals'; // v1 had a "To-Do" tab; it now lives in Goals
+if (TABS.includes(savedUi.tab)) ui.tab = savedUi.tab;
 if (CATEGORIES.includes(savedUi.todoCat)) ui.todoCat = savedUi.todoCat;
 
 function saveUi() {
@@ -249,8 +282,7 @@ function importPlanText(text) {
 
 // An example week (for trying the app out) that starts on this week's Monday.
 function examplePlan() {
-  const t = todayKey();
-  const mon = addDays(t, -((fromKey(t).getDay() + 6) % 7));
+  const mon = mondayOf(todayKey());
   const D = (i) => addDays(mon, i);
   return {
     week: mon,
@@ -339,6 +371,7 @@ function hitTop(sets, ex) {
 }
 const fmtWeight = (w) => (w === 0 ? 'BW' : `${fmtNum(w)} lb`);
 const fmtSetShort = (s) => `${s.weight === 0 ? 'BW' : fmtNum(s.weight)}×${s.reps}`;
+const didWorkout = (date) => data.sets.some((s) => s.date === date) || data.cardio.some((c) => c.date === date);
 
 function draftFor(key, ex, done, last) {
   if (!drafts[key]) {
@@ -380,30 +413,22 @@ function renderTrain() {
   }
   h += `<div class="day-strip">${plan.days.map((d) => {
     const dt = fromKey(d.date);
-    const logged = data.sets.some((s) => s.date === d.date);
     return `<button class="day-chip ${d.date === day.date ? 'active' : ''} ${d.date === t ? 'today' : ''}" data-action="train-day" data-date="${d.date}" aria-label="${esc(niceDate(d.date))}: ${esc(d.name)}">
-      <span>${DOW[dt.getDay()]}</span><b>${dt.getDate()}</b><i class="dot ${logged ? 'on' : ''}"></i></button>`;
+      <span>${DOW[dt.getDay()]}</span><b>${dt.getDate()}</b><i class="dot ${didWorkout(d.date) ? 'on' : ''}"></i></button>`;
   }).join('')}</div>`;
-  h += renderDay(day, plan);
+  h += renderDay(day);
   return h;
 }
 
-function renderDay(day, plan) {
+function renderDay(day) {
   const label = { lift: 'Lift', cardio: 'Cardio', rest: 'Rest' }[day.type] || cap(day.type);
   let h = `<section class="day-head">
     <div><h3>${esc(day.name)}</h3><div class="muted small">${niceDate(day.date)}${day.date === todayKey() ? ' · Today' : ''}</div></div>
     <span class="badge ${esc(day.type)}">${esc(label)}</span>
   </section>`;
   h += day.exercises.map((ex, i) => renderExercise(day, ex, i)).join('');
-  if (day.cardio.length) {
-    h += '<h4 class="section-label">Cardio</h4>';
-    h += day.cardio.map((c) => `<div class="card cardio-card">
-      <div class="row-between"><b>${esc(cap(c.type))}</b><span>${c.minutes ? `${esc(c.minutes)} min` : ''}${c.optional ? ' · optional' : ''}</span></div>
-      ${c.notes ? `<div class="muted">${esc(c.notes)}</div>` : ''}
-    </div>`).join('');
-    h += '<p class="muted small">Cardio logging comes in the next version.</p>';
-  }
   if (!day.exercises.length && !day.cardio.length) h += '<div class="card muted">Rest day. Walk, stretch, recover.</div>';
+  h += renderCardioSection(day);
   return h;
 }
 
@@ -480,7 +505,115 @@ function logSet(key, date, i) {
   render();
 }
 
-/* ---------- 6. Rest timer ---------- */
+/* ---------- 6. Cardio log ---------- */
+const cardioFor = (date) => data.cardio.filter((c) => c.date === date).sort((a, b) => a.ts - b.ts);
+const cardioIco = (type) => (CARDIO_TYPES.find((t) => t.id === norm(type)) || CARDIO_TYPES[4]).ico;
+function cardioLine(c) {
+  let s = `${cap(c.type)} ${fmtNum(c.minutes)} min`;
+  if (c.distance != null) s += `, ${fmtNum(c.distance)} ${c.unit || 'mi'}`;
+  if (c.painBefore != null || c.painAfter != null) s += `, back pain ${c.painBefore ?? '–'}→${c.painAfter ?? '–'}`;
+  return s;
+}
+const painWorse = (c) => c.painAfter != null && (c.painAfter > 3 || (c.painBefore != null && c.painAfter > c.painBefore));
+
+function painButtons(action, which, value) {
+  return `<div class="pain-row">${[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => `<button class="pain ${value === n ? 'active' : ''}" style="--c:${painColor(n)}" data-action="${action}" data-which="${which}" data-n="${n}" aria-label="Pain ${n} of 10">${n}</button>`).join('')}</div>`;
+}
+
+function renderCardioSection(day) {
+  const logged = cardioFor(day.date);
+  const form = ui.cardioForm && ui.cardioForm.date === day.date ? ui.cardioForm : null;
+  if (!day.cardio.length && !logged.length && !form) {
+    return `<button class="btn full log-cardio-btn" data-action="cardio-open" data-date="${day.date}">🚴 Log cardio</button>`;
+  }
+  let h = '<h4 class="section-label">Cardio</h4>';
+  // Planned cardio from the coach: shows ✓ once you've logged that type.
+  const used = {};
+  h += day.cardio.map((c) => {
+    const k = norm(c.type);
+    used[k] = (used[k] || 0) + 1;
+    const done = used[k] <= logged.filter((x) => norm(x.type) === k).length;
+    return `<div class="card cardio-card ${done ? 'complete' : ''}">
+      <div class="row-between"><b>${cardioIco(c.type)} ${esc(cap(c.type))}</b><span>${c.minutes ? `${esc(c.minutes)} min` : ''}${c.optional ? ' · optional' : ''}</span></div>
+      ${c.notes ? `<div class="muted">${esc(c.notes)}</div>` : ''}
+      ${done ? '<div class="done-tag">✓ Logged</div>'
+        : `<button class="btn full" data-action="cardio-open" data-date="${day.date}" data-type="${esc(c.type)}" data-minutes="${esc(c.minutes)}">Log this ${esc(c.type.toLowerCase())}</button>`}
+    </div>`;
+  }).join('');
+  h += logged.map((c) => `<div class="card cardio-entry">
+    <div class="plan-row">
+      <div>
+        <b>${cardioIco(c.type)} ${esc(cap(c.type))}</b> · ${fmtNum(c.minutes)} min${c.distance != null ? ` · ${fmtNum(c.distance)} ${esc(c.unit)}` : ''}
+        ${c.painBefore != null || c.painAfter != null ? `<div class="small ${painWorse(c) ? 'warn-text' : 'muted'}">${painWorse(c) ? '⚠️ ' : ''}Back pain ${c.painBefore ?? '–'} → ${c.painAfter ?? '–'}</div>` : ''}
+        ${c.notes ? `<div class="muted small">${esc(c.notes)}</div>` : ''}
+      </div>
+      <button class="icon-btn small danger" data-action="cardio-del" data-id="${c.id}" aria-label="Delete cardio">✕</button>
+    </div>
+  </div>`).join('');
+  h += form ? renderCardioForm(form)
+    : `<button class="btn full log-cardio-btn" data-action="cardio-open" data-date="${day.date}">+ Log ${day.cardio.length || logged.length ? 'other ' : ''}cardio</button>`;
+  return h;
+}
+
+function renderCardioForm(f) {
+  const known = CARDIO_TYPES.some((t) => t.id === f.type);
+  return `<div class="card cardio-form" id="cardio-form">
+    <span class="field-label">Type</span>
+    <div class="type-row">${CARDIO_TYPES.map((t) => `<button class="type-chip ${f.type === t.id || (!known && t.id === 'other') ? 'active' : ''}" data-action="cf-type" data-type="${t.id}"><span>${t.ico}</span>${t.label}</button>`).join('')}</div>
+    <label class="field-label" for="cf-min">Minutes</label>
+    <div class="stepper">
+      <button class="step" data-action="cf-step" data-by="-5">−5</button>
+      <input class="num" id="cf-min" type="number" inputmode="numeric" min="0" step="any" data-cf="minutes" value="${esc(f.minutes)}" placeholder="0">
+      <button class="step" data-action="cf-step" data-by="5">+5</button>
+    </div>
+    <label class="field-label" for="cf-dist">Distance (optional)</label>
+    <div class="quick">
+      <input class="num sm" id="cf-dist" type="number" inputmode="decimal" step="any" min="0" data-cf="distance" value="${esc(f.distance)}" placeholder="0">
+      <select class="select unit-select" data-cf="unit" aria-label="Distance unit">${DIST_UNITS.map((u) => `<option ${u === f.unit ? 'selected' : ''}>${u}</option>`).join('')}</select>
+    </div>
+    <span class="field-label">Back pain before</span>${painButtons('cf-pain', 'painBefore', f.painBefore)}
+    <span class="field-label">Back pain after</span>${painButtons('cf-pain', 'painAfter', f.painAfter)}
+    <label class="field-label" for="cf-notes">Notes (optional)</label>
+    <input class="text" id="cf-notes" type="text" data-cf="notes" value="${esc(f.notes)}" placeholder="e.g. felt easy, could talk the whole time" autocomplete="off" maxlength="200">
+    <div class="row">
+      <button class="btn" data-action="cf-cancel">Cancel</button>
+      <button class="btn primary" data-action="cf-save">Save cardio</button>
+    </div>
+  </div>`;
+}
+
+function openCardioForm(date, type, minutes) {
+  const t = norm(type) || 'bike';
+  const r = parseRange(minutes || '');
+  ui.cardioForm = {
+    date, type: t, minutes: r ? String(r.lo) : '', distance: '', unit: t === 'swim' ? 'yd' : 'mi',
+    painBefore: dayRec(date).backPain ?? null, painAfter: null, notes: '',
+  };
+  render();
+  const f = $('#cardio-form');
+  if (f) f.scrollIntoView({ block: 'start', behavior: 'smooth' });
+}
+
+function saveCardio() {
+  const f = ui.cardioForm;
+  if (!f) return;
+  const m = num(f.minutes);
+  const dist = num(f.distance);
+  if (m === null || m <= 0) { toast('Enter how many minutes'); return; }
+  const entry = {
+    id: uid(), date: f.date, type: f.type, minutes: m,
+    distance: dist !== null && dist > 0 ? dist : null, unit: f.unit,
+    painBefore: f.painBefore, painAfter: f.painAfter, notes: String(f.notes || '').trim(), ts: Date.now(),
+  };
+  data.cardio.push(entry);
+  save();
+  ui.cardioForm = null;
+  render();
+  if (painWorse(entry)) toast('Saved. Your back felt worse after. Mention it to your coach.', { ms: 4500 });
+  else toast('Cardio saved ✓');
+}
+
+/* ---------- 7. Rest timer ---------- */
 const timer = { end: null, total: 0, label: '', alerted: false };
 let timerInterval = null;
 let wakeLock = null;
@@ -585,7 +718,7 @@ function renderTimer() {
   }
 }
 
-/* ---------- 7. Daily checklist ---------- */
+/* ---------- 8. Daily checklist ---------- */
 const dayRec = (date) => data.daily[date] || {};
 function setDaily(date, field, value) {
   const r = data.daily[date] || (data.daily[date] = {});
@@ -612,13 +745,17 @@ function checklistItems(date) {
     ...planChecklist(date).map((x) => !!checks[x]),
   ];
 }
+function weekAvg(field, mon) {
+  const vals = weekDates(mon).map((d) => dayRec(d)[field]).filter((v) => v != null && v !== 0);
+  return vals.length ? { avg: sum(vals) / vals.length, n: vals.length } : null;
+}
 function weightAvg(date) {
   const vals = [];
   for (let i = 0; i < 7; i++) {
     const r = data.daily[addDays(date, -i)];
     if (r && r.weight != null) vals.push(r.weight);
   }
-  return vals.length ? { avg: vals.reduce((a, b) => a + b, 0) / vals.length, n: vals.length } : null;
+  return vals.length ? { avg: sum(vals) / vals.length, n: vals.length } : null;
 }
 
 function summaryHtml(date) {
@@ -696,7 +833,7 @@ function renderChecklist() {
 
   <div class="card">
     <div class="row-between"><b>Back pain today</b><span>${r.backPain != null ? `<b>${r.backPain}</b>/10` : 'not set'}</span></div>
-    <div class="pain-row">${[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => `<button class="pain ${r.backPain === n ? 'active' : ''}" style="--c:hsl(${140 - (n - 1) * 15} 70% 55%)" data-action="pain" data-n="${n}" aria-label="Pain ${n} of 10">${n}</button>`).join('')}</div>
+    ${painButtons('pain', 'backPain', r.backPain)}
     <div class="muted small" style="margin-top:8px">1 = barely notice it · 10 = worst ever. Tap again to clear.</div>
   </div>`;
 
@@ -708,8 +845,126 @@ function renderChecklist() {
   return h;
 }
 
-/* ---------- 8. To-do list ---------- */
-function renderTodo() {
+/* ---------- 9. Goals & to-do list ---------- */
+const goalUnit = (g) => GOAL_KINDS[g.kind].unit;
+const goalActive = (g, t = todayKey()) => !g.until || t <= g.until;
+const goalAmount = (g, date) => (g.kind === 'workouts' ? (didWorkout(date) ? 1 : 0) : Number(g.log[date]) || 0);
+const goalTargetText = (g) => `${fmtNum(g.target)} ${goalUnit(g)} a ${g.period === 'day' ? 'day' : 'week'}`;
+// Days of a week that count for a goal (not before it started, not after it ends, not in the future).
+function goalDays(g, mon, upTo) {
+  return weekDates(mon).filter((d) => d <= upTo && (!g.until || d <= g.until) && (g.kind === 'workouts' || !g.created || d >= g.created));
+}
+function goalWeek(g, mon, upTo = todayKey()) {
+  const days = goalDays(g, mon, upTo);
+  if (g.period === 'day') {
+    return { hit: days.filter((d) => goalAmount(g, d) >= g.target).length, days: days.length, total: sum(days.map((d) => goalAmount(g, d))) };
+  }
+  const done = sum(days.map((d) => goalAmount(g, d)));
+  return { done, met: done >= g.target };
+}
+
+function renderGoalCard(g) {
+  const t = todayKey();
+  const mon = mondayOf(t);
+  const active = goalActive(g, t);
+  const left = g.until ? Math.round((fromKey(g.until) - fromKey(t)) / 86400000) : null;
+  const when = !g.until ? 'ongoing' : active ? `until ${shortDate(g.until)} (${left === 0 ? 'last day' : plural(left, 'day') + ' left'})` : `ended ${shortDate(g.until)}`;
+  let body = '';
+  if (g.period === 'day') {
+    const today = goalAmount(g, t);
+    if (active) {
+      body += `<div class="row-between goal-line"><span>Today</span><span><b>${fmtNum(today)}</b> / ${fmtNum(g.target)} ${goalUnit(g)}${today >= g.target ? ' ✓' : ''}</span></div>
+        <div class="bar ${today >= g.target ? 'ok' : ''}"><i style="width:${Math.min(100, (today / g.target) * 100)}%"></i></div>`;
+    }
+    body += `<div class="week-dots">${weekDates(mon).map((d) => {
+      const counts = goalDays(g, mon, t).includes(d);
+      const state = !counts ? 'off' : goalAmount(g, d) >= g.target ? 'hit' : d === t ? 'today' : 'miss';
+      return `<span class="wd ${state}"><small>${dayName(d).charAt(0)}</small>${state === 'hit' ? '✓' : ''}</span>`;
+    }).join('')}</div>`;
+  } else {
+    const w = goalWeek(g, mon, t);
+    body += `<div class="row-between goal-line"><span>This week</span><span><b>${fmtNum(w.done)}</b> / ${fmtNum(g.target)} ${goalUnit(g)}${w.met ? ' ✓' : ''}</span></div>
+      <div class="bar ${w.met ? 'ok' : ''}"><i style="width:${Math.min(100, (w.done / g.target) * 100)}%"></i></div>`;
+  }
+  let btns = '';
+  if (active && g.kind === 'minutes') btns = [-15, 15, 30, 60].map((n) => `<button class="chip-btn" data-action="goal-log" data-id="${g.id}" data-by="${n}">${n > 0 ? '+' : '−'}${Math.abs(n)}</button>`).join('');
+  if (active && g.kind === 'count') btns = [-1, 1].map((n) => `<button class="chip-btn grow" data-action="goal-log" data-id="${g.id}" data-by="${n}">${n > 0 ? '+1' : '−1'}</button>`).join('');
+  return `<div class="card goal cat-${slug(g.category || 'Personal')}">
+    <div class="row-between"><b class="goal-title">${esc(g.title)}</b><button class="link-btn tight" data-action="goal-edit" data-id="${g.id}">Edit</button></div>
+    <div class="muted small">${esc(goalTargetText(g))} · ${esc(when)}</div>
+    ${body}
+    ${btns ? `<div class="quick">${btns}</div>` : ''}
+    ${g.kind === 'workouts' ? '<div class="muted small goal-note">Counts every day you log a lift or cardio.</div>' : ''}
+  </div>`;
+}
+
+function renderGoalForm(f) {
+  return `<div class="card goal-form" id="goal-form">
+    <h3>${f.id ? 'Edit goal' : 'New recurring goal'}</h3>
+    <label class="field-label" for="gf-title">Goal</label>
+    <input class="text" id="gf-title" type="text" data-gf="title" value="${esc(f.title)}" placeholder="e.g. Study for Materials" autocomplete="off" maxlength="80">
+    <label class="field-label" for="gf-cat">Category</label>
+    <div class="row" style="margin-top:0"><select class="select" id="gf-cat" data-gf="category">${CATEGORIES.map((c) => `<option ${c === f.category ? 'selected' : ''}>${c}</option>`).join('')}</select></div>
+    <span class="field-label">How to track it</span>
+    <div class="opts">${Object.entries(GOAL_KINDS).map(([k, v]) => `<button class="opt ${f.kind === k ? 'active' : ''}" data-action="gf-kind" data-kind="${k}">${v.label}</button>`).join('')}</div>
+    <label class="field-label" for="gf-target">Target</label>
+    <div class="quick">
+      <input class="num sm" id="gf-target" type="number" inputmode="numeric" min="1" step="any" data-gf="target" value="${esc(f.target)}">
+      <span class="unit wide">${GOAL_KINDS[f.kind].unit}</span>
+      ${f.kind === 'workouts' ? '<span class="unit wide">a week</span>'
+        : `<select class="select" data-gf="period" aria-label="Per day or week"><option value="day" ${f.period === 'day' ? 'selected' : ''}>a day</option><option value="week" ${f.period === 'week' ? 'selected' : ''}>a week</option></select>`}
+    </div>
+    <label class="field-label" for="gf-until">Until (optional)</label>
+    <input class="text" id="gf-until" type="date" data-gf="until" value="${esc(f.until)}">
+    <div class="row">
+      ${f.id ? '<button class="btn danger" data-action="gf-delete">Delete</button>' : ''}
+      <button class="btn" data-action="gf-cancel">Cancel</button>
+      <button class="btn primary" data-action="gf-save">Save</button>
+    </div>
+  </div>`;
+}
+
+function saveGoalForm() {
+  const f = ui.goalForm;
+  const title = String(f.title || '').trim();
+  const target = num(f.target);
+  if (!title) { toast('Give the goal a name'); return; }
+  if (target === null || target <= 0) { toast('Set a target above 0'); return; }
+  if (f.until && !isDateKey(f.until)) { toast('That end date doesn\'t look right'); return; }
+  const fields = {
+    title, category: f.category, kind: f.kind,
+    period: f.kind === 'workouts' ? 'week' : f.period, target, until: f.until || '',
+  };
+  if (f.id) {
+    const g = data.goals.find((x) => x.id === f.id);
+    if (g) Object.assign(g, fields);
+  } else {
+    data.goals.push({ id: uid(), created: todayKey(), log: {}, ...fields });
+  }
+  save();
+  ui.goalForm = null;
+  render();
+  toast('Goal saved ✓');
+}
+
+function renderGoals() {
+  const t = todayKey();
+  const active = data.goals.filter((g) => goalActive(g, t));
+  const ended = data.goals.filter((g) => !goalActive(g, t));
+  let h = `<div class="row-between"><h2>Goals</h2><span class="muted small">${niceDate(t)}</span></div>`;
+  if (ui.goalForm) h += renderGoalForm(ui.goalForm);
+  h += active.map(renderGoalCard).join('');
+  if (!data.goals.length && !ui.goalForm) {
+    h += `<div class="card muted small">Recurring goals track things like “work out 4 days a week” or “study 1 hour a day”, and show how you're doing this week.
+      <br><button class="link-btn" data-action="goal-examples">Add those two to start</button></div>`;
+  }
+  if (!ui.goalForm) h += '<button class="btn full" data-action="goal-new">+ New recurring goal</button>';
+  if (ended.length) h += `<details class="ended"><summary>Ended goals (${ended.length})</summary>${ended.map(renderGoalCard).join('')}</details>`;
+  h += `<div class="section"><h3 class="section-title">To-Do today</h3>${renderTodoBody()}</div>`;
+  return h;
+}
+
+function renderTodoBody() {
   const t = todayKey();
   const f = ui.todoFilter;
   const match = (x) => f === 'All' || x.category === f;
@@ -726,8 +981,7 @@ function renderTodo() {
   </div>`;
 
   const shown = open.filter(match);
-  let h = `<h2>To-Do</h2><div class="muted small">${niceDate(t)}</div>
-  <form class="card" data-form="todo">
+  let h = `<form class="card" data-form="todo">
     <input id="todo-text" class="text" type="text" placeholder="Add something to do today…" autocomplete="off" enterkeyhint="done" maxlength="200" aria-label="New to-do">
     <div class="row">
       <select id="todo-cat" class="select" aria-label="Category">${CATEGORIES.map((c) => `<option ${c === ui.todoCat ? 'selected' : ''}>${c}</option>`).join('')}</select>
@@ -761,7 +1015,261 @@ function addTodo() {
   if (again) again.focus(); // keep the keyboard up so you can add several in a row
 }
 
-/* ---------- 9. More: import, saved plans, backup ---------- */
+/* ---------- 10. Progress & weekly check-in for your coach ---------- */
+function planForWeek(mon) {
+  if (data.plans[mon]) return data.plans[mon];
+  const dates = weekDates(mon);
+  return Object.values(data.plans)
+    .sort((a, b) => (b.importedAt || 0) - (a.importedAt || 0))
+    .find((p) => p.days.some((d) => dates.includes(d.date))) || null;
+}
+const fmtSetCoach = (s) => `${s.weight === 0 ? 'BW' : fmtNum(s.weight)}×${s.reps}${s.rir != null ? ` RIR${s.rir === 5 ? '5+' : s.rir}` : ''}`;
+
+// Builds the plain-text summary you paste to your coach on Sunday.
+function weekSummary(mon) {
+  const t = todayKey();
+  const dates = weekDates(mon);
+  const end = dates[6];
+  const pastDates = dates.filter((d) => d <= t);
+  const plan = planForWeek(mon);
+  const L = [];
+  L.push(`WEEKLY CHECK-IN: ${niceDate(mon)} to ${niceDate(end)}, ${fromKey(end).getFullYear()}`);
+  if (plan) L.push(`Plan: ${plan.title}`);
+  L.push('(Sets are weight in lb × reps. RIR = reps in reserve. BW = bodyweight.)');
+  L.push('');
+
+  // Body
+  const wts = dates.map((d) => [d, dayRec(d).weight]).filter((x) => x[1] != null);
+  if (wts.length) {
+    const a = weekAvg('weight', mon);
+    const p = weekAvg('weight', addDays(mon, -7));
+    let line = `Body weight: avg ${fmtNum(a.avg)} lb from ${plural(a.n, 'weigh-in')}`;
+    if (p) { const diff = Math.round((a.avg - p.avg) * 10) / 10; line += ` (last week ${fmtNum(p.avg)}, ${diff >= 0 ? '+' : ''}${fmtNum(diff)})`; }
+    L.push(line);
+    L.push(`  ${wts.map(([d, w]) => `${dayName(d)} ${fmtNum(w)}`).join(', ')}`);
+  } else L.push('Body weight: no weigh-ins logged');
+  const waists = dates.map((d) => [d, dayRec(d).waist]).filter((x) => x[1] != null);
+  if (waists.length) L.push(`Waist: ${waists.map(([d, w]) => `${dayName(d)} ${fmtNum(w)} in`).join(', ')}`);
+  const pains = pastDates.map((d) => [d, dayRec(d).backPain]);
+  const pv = pains.filter((x) => x[1] != null).map((x) => x[1]);
+  L.push(pv.length
+    ? `Back pain (daily, 1-10): ${pains.map(([d, v]) => `${dayName(d)} ${v ?? '–'}`).join(', ')} (avg ${fmtNum(sum(pv) / pv.length)})`
+    : 'Back pain (daily): not logged');
+
+  // Nutrition & steps
+  const prot = dates.map((d) => dayRec(d).protein).filter((v) => v > 0);
+  const cals = dates.map((d) => dayRec(d).calories).filter((v) => v > 0);
+  L.push(prot.length
+    ? `Protein: avg ${Math.round(sum(prot) / prot.length)} g over ${plural(prot.length, 'logged day')}; ${prot.filter((v) => v >= TARGETS.proteinMin).length} at ${TARGETS.proteinMin} g+, ${prot.filter((v) => v >= TARGETS.protein).length} at ${TARGETS.protein} g+`
+    : 'Protein: not logged');
+  L.push(cals.length ? `Calories: avg ${Math.round(sum(cals) / cals.length).toLocaleString()} over ${plural(cals.length, 'logged day')}` : 'Calories: not logged');
+  L.push(`10,000 steps: ${pastDates.filter((d) => dayRec(d).steps).length}/${pastDates.length} days`);
+  const weekCardio = data.cardio.filter((c) => dates.includes(c.date));
+  L.push(`Training: ${plural(dates.filter((d) => data.sets.some((s) => s.date === d)).length, 'lifting day')}, ${plural(weekCardio.length, 'cardio session')} (${fmtNum(sum(weekCardio.map((c) => c.minutes)))} min)`);
+
+  // Day by day
+  L.push('');
+  L.push('DAY BY DAY');
+  for (const d of dates) {
+    const pd = (plan && plan.days.find((x) => x.date === d)) || planDayFor(d);
+    const future = d > t;
+    L.push('');
+    L.push(`${niceDate(d)}${pd ? ` - ${pd.name} (${pd.type})` : ''}`);
+    const lines = [];
+    const planned = pd ? pd.exercises : [];
+    const plannedNames = new Set(planned.map((e) => norm(e.name)));
+    for (const ex of planned) {
+      const sets = setsFor(d, ex.name);
+      if (sets.length) lines.push(`  ${ex.name} (plan ${ex.sets}×${ex.reps}): ${sets.map(fmtSetCoach).join(', ')}${hitTop(sets, ex) ? ' - top of range on all sets' : ''}`);
+      else if (!future) lines.push(`  ${ex.name} (plan ${ex.sets}×${ex.reps}): not done`);
+    }
+    const extra = new Map();
+    data.sets.filter((s) => s.date === d && !plannedNames.has(norm(s.exercise))).sort((a, b) => a.ts - b.ts).forEach((s) => {
+      if (!extra.has(s.exercise)) extra.set(s.exercise, []);
+      extra.get(s.exercise).push(s);
+    });
+    for (const [name, sets] of extra) lines.push(`  ${name}: ${sets.map(fmtSetCoach).join(', ')}`);
+    const cs = cardioFor(d);
+    cs.forEach((c) => lines.push(`  Cardio: ${cardioLine(c)}${c.notes ? `. Notes: ${c.notes}` : ''}`));
+    if (pd && !future) {
+      const used = {};
+      pd.cardio.forEach((c) => {
+        const k = norm(c.type);
+        used[k] = (used[k] || 0) + 1;
+        if (used[k] > cs.filter((x) => norm(x.type) === k).length) lines.push(`  Planned cardio not done: ${cap(c.type)}${c.minutes ? ` ${c.minutes} min` : ''}${c.optional ? ' (optional)' : ''}`);
+      });
+    }
+    const r = dayRec(d);
+    const bits = [];
+    if (r.weight != null) bits.push(`weight ${fmtNum(r.weight)}`);
+    if (r.backPain != null) bits.push(`back pain ${r.backPain}/10`);
+    if (r.protein) bits.push(`protein ${fmtNum(r.protein)} g`);
+    if (r.calories) bits.push(`${r.calories.toLocaleString()} cal`);
+    if (r.steps) bits.push('10k steps ✓');
+    if (r.waist != null) bits.push(`waist ${fmtNum(r.waist)} in`);
+    if (pd && !future) pd.checklist.filter((x) => !isBuiltIn(x)).forEach((x) => bits.push(`${x} ${r.checks && r.checks[x] ? '✓' : '✗'}`));
+    if (bits.length) lines.push(`  Daily: ${bits.join(', ')}`);
+    if (!lines.length) lines.push(future ? '  (not yet)' : '  (nothing logged)');
+    L.push(...lines);
+  }
+
+  // Goals
+  const gs = data.goals.filter((g) => (!g.until || g.until >= mon) && (!g.created || g.created <= end));
+  if (gs.length) {
+    L.push('');
+    L.push('GOALS');
+    gs.forEach((g) => {
+      const w = goalWeek(g, mon, end < t ? end : t);
+      L.push(`  ${g.title} (${goalTargetText(g)}): ${g.period === 'day' ? `hit ${w.hit} of ${plural(w.days, 'day')}, ${fmtNum(w.total)} ${goalUnit(g)} total` :`${fmtNum(w.done)}/${fmtNum(g.target)} ${goalUnit(g)}${w.met ? ' ✓' : ''}`}`);
+    });
+  }
+  return L.join('\n');
+}
+
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); return true; } catch (e) { /* try the old way */ }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    ta.setSelectionRange(0, text.length);
+    const ok = document.execCommand('copy');
+    ta.remove();
+    return ok;
+  } catch (e) { return false; }
+}
+
+// A small line chart drawn with SVG (no chart library needed).
+function lineChart(vals, labels, unit = '') {
+  const pts = vals.map((v, i) => (v == null ? null : [i, v])).filter(Boolean);
+  if (pts.length < 2) return '';
+  const W = 320;
+  const H = 110;
+  const P = 8;
+  const ys = pts.map((p) => p[1]);
+  const lo = Math.min(...ys);
+  const hi = Math.max(...ys);
+  let min = lo;
+  let max = hi;
+  if (max - min < 1) { min -= 0.5; max += 0.5; }
+  const x = (i) => P + (i / Math.max(1, vals.length - 1)) * (W - 2 * P);
+  const y = (v) => P + (1 - (v - min) / (max - min)) * (H - 2 * P);
+  const line = pts.map(([i, v]) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
+  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Chart from ${fmtNum(lo)} to ${fmtNum(hi)}${unit}">
+      <polyline points="${line}" fill="none" stroke="var(--accent)" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+      ${pts.map(([i, v]) => `<circle cx="${x(i).toFixed(1)}" cy="${y(v).toFixed(1)}" r="3.5" fill="var(--accent)"/>`).join('')}
+    </svg>
+    <div class="chart-axis"><span>${esc(labels[pts[0][0]])}</span><span>low ${fmtNum(lo)}${unit} · high ${fmtNum(hi)}${unit}</span><span>${esc(labels[pts[pts.length - 1][0]])}</span></div>`;
+}
+
+const bestSet = (sets) => sets.reduce((b, s) => (!b || s.weight > b.weight || (s.weight === b.weight && s.reps > b.reps) ? s : b), null);
+function exerciseHistory() {
+  const by = new Map();
+  for (const s of data.sets) {
+    const k = norm(s.exercise);
+    if (!by.has(k)) by.set(k, { name: s.exercise, dates: new Map() });
+    const e = by.get(k);
+    if (!e.dates.has(s.date)) e.dates.set(s.date, []);
+    e.dates.get(s.date).push(s);
+  }
+  return [...by.values()].map((e) => {
+    const sessions = [...e.dates.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1))
+      .map(([date, sets]) => ({ date, sets: sets.sort((a, b) => a.ts - b.ts), best: bestSet(sets) }));
+    return { name: e.name, sessions, last: sessions[sessions.length - 1].date };
+  }).sort((a, b) => (a.last < b.last ? 1 : a.last > b.last ? -1 : 0));
+}
+
+function renderProgress() {
+  const t = todayKey();
+  const thisMon = mondayOf(t);
+  const mon = ui.sumWeek || thisMon;
+  let h = `<h2>Progress</h2>
+  <div class="card checkin">
+    <div class="week-head">
+      <button class="icon-btn" data-action="sum-week" data-by="-7" aria-label="Previous week">‹</button>
+      <div class="week-title"><b>Weekly check-in</b><div class="muted small">${shortDate(mon)} – ${shortDate(addDays(mon, 6))}${mon === thisMon ? ' (this week)' : ''}</div></div>
+      <button class="icon-btn" data-action="sum-week" data-by="7" ${mon >= thisMon ? 'disabled' : ''} aria-label="Next week">›</button>
+    </div>
+    <p class="muted small">Copies the whole week as text (sets, cardio, back pain, weight, food, goals) so you can paste it to your coach on Sunday.</p>
+    <button class="btn primary big full" data-action="copy-summary">📋 Copy summary for coach</button>
+    ${navigator.share ? '<button class="btn full" data-action="share-summary">📤 Share summary…</button>' : ''}
+    <details class="preview" id="summary-preview"><summary>Preview the text</summary><pre class="summary-pre">${esc(weekSummary(mon))}</pre></details>
+  </div>`;
+
+  // Body weight: weekly averages
+  let weeks = [];
+  for (let i = 11; i >= 0; i--) {
+    const m = addDays(thisMon, -7 * i);
+    weeks.push({ mon: m, a: weekAvg('weight', m) });
+  }
+  const firstWithData = weeks.findIndex((w) => w.a);
+  if (firstWithData > 0) weeks = weeks.slice(firstWithData); // start the chart at your first weigh-in
+  const withData = weeks.filter((w) => w.a);
+  h += '<div class="section"><h3 class="section-title">Body weight (weekly average)</h3>';
+  if (withData.length === 1) h += '<p class="muted small">The chart appears after your second week of weigh-ins.</p>';
+  if (!withData.length) {
+    h += '<p class="muted small">Log a weigh-in on the Checklist tab and your weekly averages show up here.</p>';
+  } else {
+    h += `<div class="card">${lineChart(weeks.map((w) => (w.a ? w.a.avg : null)), weeks.map((w) => shortDate(w.mon)), ' lb')}`;
+    h += withData.slice().reverse().slice(0, 8).map((w) => {
+      const i = withData.indexOf(w);
+      const prev = withData[i - 1];
+      const diff = prev ? Math.round((w.a.avg - prev.a.avg) * 10) / 10 : null;
+      return `<div class="hist-row"><span>Week of ${shortDate(w.mon)}</span><span><b>${fmtNum(w.a.avg)} lb</b> <small class="muted">(${w.a.n})</small>${diff != null ? ` <small class="${diff <= 0 ? 'good-text' : 'muted'}">${diff > 0 ? '+' : ''}${fmtNum(diff)}</small>` : ''}</span></div>`;
+    }).join('');
+    h += '</div>';
+  }
+  h += '</div>';
+
+  // Back pain: last 14 days
+  const painDays = [];
+  for (let i = 13; i >= 0; i--) painDays.push(addDays(t, -i));
+  if (painDays.some((d) => dayRec(d).backPain != null)) {
+    const thisW = weekAvg('backPain', thisMon);
+    const lastW = weekAvg('backPain', addDays(thisMon, -7));
+    h += `<div class="section"><h3 class="section-title">Back pain (last 14 days)</h3><div class="card">
+      <div class="pain-strip">${painDays.map((d) => {
+        const v = dayRec(d).backPain;
+        return `<div class="ps"><span class="ps-v" ${v != null ? `style="--c:${painColor(v)}"` : ''}>${v ?? '·'}</span><small>${dayName(d).charAt(0)}${fromKey(d).getDate()}</small></div>`;
+      }).join('')}</div>
+      <div class="muted small" style="margin-top:8px">Average this week: <b>${thisW ? fmtNum(thisW.avg) : '–'}</b> · last week: <b>${lastW ? fmtNum(lastW.avg) : '–'}</b></div>
+    </div></div>`;
+  }
+
+  // Exercise history
+  const hist = exerciseHistory();
+  h += '<div class="section"><h3 class="section-title">Exercise history</h3>';
+  h += hist.length ? hist.map((e) => {
+    const last = e.sessions[e.sessions.length - 1];
+    const top = bestSet(e.sessions.map((s) => s.best));
+    return `<details class="card hist">
+      <summary><div class="hist-name">${esc(e.name)}</div>
+        <div class="muted small">Last ${shortDate(last.date)}: best ${fmtSetShort(last.best)} · all-time best ${fmtSetShort(top)} · ${plural(e.sessions.length, 'session')}</div></summary>
+      <div class="hist-body">
+        ${lineChart(e.sessions.map((s) => s.best.weight), e.sessions.map((s) => shortDate(s.date)), ' lb')}
+        ${e.sessions.slice().reverse().slice(0, 15).map((s) => `<div class="hist-row"><span>${shortDate(s.date)}</span><span>${s.sets.map((x) => (x === s.best ? `<b>${fmtSetShort(x)}</b>` : fmtSetShort(x))).join(' · ')}</span></div>`).join('')}
+      </div>
+    </details>`;
+  }).join('') : '<p class="muted small">Log some sets on the Train tab and each exercise\'s history shows up here.</p>';
+  h += '</div>';
+
+  // Cardio
+  const cardio = data.cardio.slice().sort((a, b) => (a.date === b.date ? b.ts - a.ts : a.date < b.date ? 1 : -1));
+  if (cardio.length) {
+    const wk = data.cardio.filter((c) => c.date >= thisMon && c.date <= addDays(thisMon, 6));
+    h += `<div class="section"><h3 class="section-title">Cardio</h3><div class="card">
+      <div class="row-between"><span>This week</span><b>${fmtNum(sum(wk.map((c) => c.minutes)))} min · ${plural(wk.length, 'session')}</b></div>
+      ${cardio.slice(0, 10).map((c) => `<div class="hist-row"><span>${shortDate(c.date)}</span><span class="${painWorse(c) ? 'warn-text' : ''}">${cardioIco(c.type)} ${esc(cardioLine(c))}</span></div>`).join('')}
+    </div></div>`;
+  }
+  return h;
+}
+
+/* ---------- 11. More: import, saved plans, backup ---------- */
 let canShareFiles = false;
 try {
   canShareFiles = !!(navigator.canShare && navigator.canShare({ files: [new File(['{}'], 'test.json', { type: 'application/json' })] }));
@@ -779,6 +1287,7 @@ function backupBlob() {
   return new Blob([JSON.stringify({ ...data, exportedAt: new Date().toISOString(), appVersion: APP_VERSION })], { type: 'application/json' });
 }
 const backupName = () => `tracker-backup-${todayKey()}.json`;
+const countsText = (d) => `${d.sets.length} sets · ${d.cardio.length} cardio · ${Object.keys(d.plans).length} plans · ${d.goals.length} goals · ${d.todos.length} to-dos · ${Object.keys(d.daily).length} checklist days`;
 
 function saveBackupFile() {
   const url = URL.createObjectURL(backupBlob());
@@ -808,7 +1317,7 @@ async function restoreFromFile(file) {
   if (!obj || obj.app !== 'goal-tracker') { alert('That doesn\'t look like a backup from this app.'); return; }
   const n = normalizeData(obj);
   const when = obj.exportedAt ? new Date(obj.exportedAt).toLocaleString() : 'unknown date';
-  const ok = confirm(`Replace ALL data on this device with this backup?\n\nBackup from: ${when}\n${n.sets.length} sets · ${Object.keys(n.plans).length} plans · ${n.todos.length} to-dos · ${Object.keys(n.daily).length} checklist days\n\nWhat's on this device now will be overwritten.`);
+  const ok = confirm(`Replace ALL data on this device with this backup?\n\nBackup from: ${when}\n${countsText(n)}\n\nWhat's on this device now will be overwritten.`);
   if (!ok) return;
   try { localStorage.setItem(`${STORE_KEY}.beforeRestore`, JSON.stringify(data)); } catch (e) { /* ignore */ }
   data = n;
@@ -816,6 +1325,8 @@ async function restoreFromFile(file) {
   Object.keys(drafts).forEach((k) => delete drafts[k]);
   ui.planWeek = null;
   ui.trainDate = null;
+  ui.cardioForm = null;
+  ui.goalForm = null;
   render();
   toast('Backup restored ✓');
 }
@@ -865,7 +1376,8 @@ function renderMore() {
       <li><b>iPhone:</b> open this page in Safari → Share button → <b>Add to Home Screen</b>.</li>
       <li><b>Android:</b> open in Chrome → ⋮ menu → <b>Install app</b> (or Add to Home screen).</li>
     </ul>
-    <p class="muted small">Stored: ${data.sets.length} sets · ${data.todos.length} to-dos · ${Object.keys(data.daily).length} checklist days · version ${APP_VERSION}</p>
+    <p class="muted small">Stored: ${countsText(data)}</p>
+    <p class="muted small">App version <b>${APP_VERSION}</b></p>
   </div>`;
   return h;
 }
@@ -881,28 +1393,32 @@ function toast(msg, opts = {}) {
   toastTimer = setTimeout(() => { el.classList.remove('show'); undoFn = null; }, opts.ms || (opts.undo ? 5000 : 2200));
 }
 
-/* ---------- 10. Drawing the screen & handling taps ---------- */
+/* ---------- 12. Drawing the screen & handling taps ---------- */
 function render() {
+  if (!TABS.includes(ui.tab)) ui.tab = 'train';
   const view = $('#view');
   if (ui.tab === 'train') view.innerHTML = renderTrain();
   else if (ui.tab === 'check') view.innerHTML = renderChecklist();
-  else if (ui.tab === 'todo') view.innerHTML = renderTodo();
+  else if (ui.tab === 'goals') view.innerHTML = renderGoals();
+  else if (ui.tab === 'progress') view.innerHTML = renderProgress();
   else view.innerHTML = renderMore();
   document.querySelectorAll('.tabbar button').forEach((b) => b.classList.toggle('active', b.dataset.tab === ui.tab));
   renderTimer();
 }
+const today = () => ui.checkDate || todayKey();
 
 // Every tappable thing has data-action="..."; this table says what each one does.
 const actions = {
   tab(el) {
-    ui.tab = el.dataset.tab;
+    ui.tab = el.dataset.tab === 'todo' ? 'goals' : el.dataset.tab;
     importResult = null;
     saveUi();
     render();
     window.scrollTo(0, 0);
   },
-  'plan-week'(el) { ui.planWeek = el.dataset.week || null; ui.trainDate = null; ui.openEx = null; render(); },
-  'train-day'(el) { ui.trainDate = el.dataset.date; ui.openEx = null; render(); },
+  // Training
+  'plan-week'(el) { ui.planWeek = el.dataset.week || null; ui.trainDate = null; ui.openEx = null; ui.cardioForm = null; render(); },
+  'train-day'(el) { ui.trainDate = el.dataset.date; ui.openEx = null; ui.cardioForm = null; render(); },
   'toggle-ex'(el) {
     const key = el.dataset.key;
     ui.openEx = ui.openEx === key ? null : key;
@@ -938,37 +1454,118 @@ const actions = {
   'timer-add'(el) { adjustTimer(Number(el.dataset.by)); },
   'timer-stop'() { stopTimer(); },
 
+  // Cardio
+  'cardio-open'(el) { openCardioForm(el.dataset.date, el.dataset.type, el.dataset.minutes); },
+  'cf-type'(el) {
+    const f = ui.cardioForm;
+    f.type = el.dataset.type;
+    if (f.type === 'swim' && f.unit === 'mi') f.unit = 'yd';
+    if (f.type !== 'swim' && f.unit === 'yd') f.unit = 'mi';
+    render();
+  },
+  'cf-step'(el) {
+    const f = ui.cardioForm;
+    f.minutes = fmtNum(Math.max(0, (num(f.minutes) || 0) + Number(el.dataset.by)));
+    render();
+  },
+  'cf-pain'(el) {
+    const f = ui.cardioForm;
+    const n = Number(el.dataset.n);
+    f[el.dataset.which] = f[el.dataset.which] === n ? null : n;
+    render();
+  },
+  'cf-cancel'() { ui.cardioForm = null; render(); },
+  'cf-save'() { saveCardio(); },
+  'cardio-del'(el) {
+    const i = data.cardio.findIndex((c) => c.id === el.dataset.id);
+    if (i === -1) return;
+    const [removed] = data.cardio.splice(i, 1);
+    save();
+    render();
+    toast('Cardio deleted', { undo: () => { data.cardio.push(removed); save(); render(); } });
+  },
+
+  // Checklist
   'check-day'(el) {
-    const next = addDays(ui.checkDate || todayKey(), Number(el.dataset.by));
+    const next = addDays(today(), Number(el.dataset.by));
     ui.checkDate = next >= todayKey() ? null : next;
     render();
   },
   'toggle-daily'(el) {
-    const date = ui.checkDate || todayKey();
-    setDaily(date, el.dataset.field, !dayRec(date)[el.dataset.field]);
+    setDaily(today(), el.dataset.field, !dayRec(today())[el.dataset.field]);
     render();
   },
   'add-daily'(el) {
-    const date = ui.checkDate || todayKey();
     const f = el.dataset.field;
-    setDaily(date, f, (dayRec(date)[f] || 0) + Number(el.dataset.by));
+    setDaily(today(), f, (dayRec(today())[f] || 0) + Number(el.dataset.by));
     render();
   },
   pain(el) {
-    const date = ui.checkDate || todayKey();
     const n = Number(el.dataset.n);
-    setDaily(date, 'backPain', dayRec(date).backPain === n ? null : n);
+    setDaily(today(), 'backPain', dayRec(today()).backPain === n ? null : n);
     render();
   },
   'toggle-check'(el) {
-    const date = ui.checkDate || todayKey();
-    const checks = { ...(dayRec(date).checks || {}) };
+    const checks = { ...(dayRec(today()).checks || {}) };
     const text = el.dataset.text;
     if (checks[text]) delete checks[text]; else checks[text] = true;
-    setDaily(date, 'checks', Object.keys(checks).length ? checks : null);
+    setDaily(today(), 'checks', Object.keys(checks).length ? checks : null);
     render();
   },
 
+  // Goals
+  'goal-log'(el) {
+    const g = data.goals.find((x) => x.id === el.dataset.id);
+    if (!g) return;
+    const t = todayKey();
+    const v = Math.max(0, (Number(g.log[t]) || 0) + Number(el.dataset.by));
+    if (v) g.log[t] = v; else delete g.log[t];
+    save();
+    render();
+  },
+  'goal-new'() {
+    ui.goalForm = { id: null, title: '', category: ui.todoCat, kind: 'count', period: 'week', target: '3', until: '' };
+    render();
+    const f = $('#gf-title');
+    if (f) f.focus();
+  },
+  'goal-edit'(el) {
+    const g = data.goals.find((x) => x.id === el.dataset.id);
+    if (!g) return;
+    ui.goalForm = { id: g.id, title: g.title, category: g.category, kind: g.kind, period: g.period, target: String(g.target), until: g.until || '' };
+    render();
+    const f = $('#goal-form');
+    if (f) f.scrollIntoView({ block: 'start', behavior: 'smooth' });
+  },
+  'gf-kind'(el) {
+    ui.goalForm.kind = el.dataset.kind;
+    if (el.dataset.kind === 'workouts') ui.goalForm.period = 'week';
+    if (el.dataset.kind === 'minutes' && ui.goalForm.period === 'week' && ui.goalForm.target === '3') { ui.goalForm.period = 'day'; ui.goalForm.target = '60'; }
+    render();
+  },
+  'gf-cancel'() { ui.goalForm = null; render(); },
+  'gf-save'() { saveGoalForm(); },
+  'gf-delete'() {
+    const i = data.goals.findIndex((x) => x.id === ui.goalForm.id);
+    if (i === -1) return;
+    const [removed] = data.goals.splice(i, 1);
+    ui.goalForm = null;
+    save();
+    render();
+    toast('Goal deleted', { undo: () => { data.goals.splice(i, 0, removed); save(); render(); } });
+  },
+  'goal-examples'() {
+    const t = todayKey();
+    data.goals.push(
+      { id: uid(), created: t, log: {}, title: 'Work out', category: 'Training', kind: 'workouts', period: 'week', target: 4, until: t <= '2026-12-05' ? '2026-12-05' : '' },
+      { id: uid(), created: t, log: {}, title: 'Study for Materials', category: 'School', kind: 'minutes', period: 'day', target: 60, until: '' },
+    );
+    save();
+    render();
+    toast('Added. Tap Edit on either one to change it.');
+  },
+
+  // To-do
   'todo-filter'(el) { ui.todoFilter = el.dataset.cat; render(); },
   'todo-toggle'(el) {
     const x = data.todos.find((t) => t.id === el.dataset.id);
@@ -987,6 +1584,26 @@ const actions = {
     toast('To-do deleted', { undo: () => { data.todos.splice(i, 0, removed); save(); render(); } });
   },
 
+  // Progress
+  'sum-week'(el) {
+    const next = addDays(ui.sumWeek || mondayOf(todayKey()), Number(el.dataset.by));
+    ui.sumWeek = next >= mondayOf(todayKey()) ? null : next;
+    render();
+  },
+  async 'copy-summary'() {
+    const ok = await copyText(weekSummary(ui.sumWeek || mondayOf(todayKey())));
+    if (ok) toast('Copied! Paste it in your coach chat.');
+    else {
+      const p = $('#summary-preview');
+      if (p) { p.open = true; p.scrollIntoView({ block: 'start', behavior: 'smooth' }); }
+      toast('Couldn\'t copy automatically. Long-press the text to select it.', { ms: 4500 });
+    }
+  },
+  async 'share-summary'() {
+    try { await navigator.share({ text: weekSummary(ui.sumWeek || mondayOf(todayKey())) }); } catch (e) { /* cancelled */ }
+  },
+
+  // More
   async 'paste-plan'() {
     let text = '';
     try { text = await navigator.clipboard.readText(); } catch (e) { text = ''; }
@@ -1035,16 +1652,20 @@ document.addEventListener('click', (e) => {
 document.addEventListener('input', (e) => {
   const t = e.target;
   if (t.dataset.draft && drafts[t.dataset.draft]) drafts[t.dataset.draft][t.dataset.field] = t.value;
+  if (t.dataset.cf && ui.cardioForm) ui.cardioForm[t.dataset.cf] = t.value;
+  if (t.dataset.gf && ui.goalForm) ui.goalForm[t.dataset.gf] = t.value;
   if (t.id === 'plan-text') ui.planDraft = t.value;
 });
-// Finished typing in a box (you tapped away): save it.
+// Finished typing in a box (you tapped away) or picked from a list: save it.
 document.addEventListener('change', (e) => {
   const t = e.target;
   if (t.dataset.daily) {
     const v = num(t.value);
-    setDaily(ui.checkDate || todayKey(), t.dataset.daily, v !== null && v >= 0 ? v : null);
+    setDaily(today(), t.dataset.daily, v !== null && v >= 0 ? v : null);
     patchChecklist(); // update the numbers without redrawing the whole screen
   }
+  if (t.dataset.cf && ui.cardioForm) ui.cardioForm[t.dataset.cf] = t.value;
+  if (t.dataset.gf && ui.goalForm) ui.goalForm[t.dataset.gf] = t.value;
   if (t.id === 'todo-cat') { ui.todoCat = t.value; saveUi(); }
   if (t.id === 'restore-file' && t.files && t.files[0]) {
     restoreFromFile(t.files[0]);
@@ -1058,8 +1679,8 @@ document.addEventListener('submit', (e) => {
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState !== 'visible') return;
   if (timer.end) keepAwake(true);
-  const typing = document.activeElement && ['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName);
-  if (!typing) render();
+  const typing = document.activeElement && ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName);
+  if (!typing && !ui.cardioForm && !ui.goalForm) render();
 });
 
 /* ---------- Start up ---------- */
