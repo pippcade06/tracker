@@ -403,3 +403,14 @@ details.hist[open] > summary::after { content: 'Hide ▴'; }
   border-bottom: 4px solid var(--c, transparent);
 }
 .ps small { color: var(--muted); font-size: .68rem; }
+
+/* ============ Meals (v2.1) ============ */
+.meal-list { margin-top: 8px; border-top: 1px solid var(--line); }
+.meal-row { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.meal-txt { flex: 1; min-width: 0; }
+.meal-txt b { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+textarea.meal-text { min-height: 72px; margin-top: 10px; font-size: 15px; }
+.again { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+.again-btn { height: 46px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 700; padding: 0 12px; }
+a.btn { color: var(--text); }
+#meals .row > a.btn { flex: 0 0 auto; }

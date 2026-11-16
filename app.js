@@ -9,13 +9,15 @@
    ===================================================================== */
 
 /* ---------- 1. Settings ---------- */
-const APP_VERSION = '2.0.0';
+const APP_VERSION = '2.1.0';
 const STORE_KEY = 'tracker.data.v1'; // (name kept from v1 so your data carries over)
 const UI_KEY = 'tracker.ui.v1';
 const BACKUP_KEY = 'tracker.lastBackup';
 const TABS = ['train', 'check', 'goals', 'progress', 'more'];
 const CATEGORIES = ['Training', 'School', 'Work', 'Side projects', 'Personal'];
 const TARGETS = { steps: 10000, protein: 160, proteinMin: 130, calories: 2500, caloriesLow: 2300 };
+// Your "Meal → Macros" page on claude.ai (it uses your Claude plan to estimate a meal from a photo).
+const MEAL_PAGE_URL = 'https://claude.ai/artifact/1dpDoGbDW6Guqz2TN1gHQz';
 const CARDIO_TYPES = [
   { id: 'bike', label: 'Bike', ico: '🚴' },
   { id: 'row', label: 'Row', ico: '🚣' },
@@ -111,7 +113,7 @@ function save() {
 const ui = {
   tab: 'train', planWeek: null, trainDate: null, openEx: null, checkDate: null,
   todoFilter: 'All', todoCat: 'Personal', planDraft: '',
-  cardioForm: null, goalForm: null, sumWeek: null,
+  cardioForm: null, goalForm: null, sumWeek: null, mealBox: false, mealDraft: '',
 };
 let savedUi = {};
 try { savedUi = JSON.parse(localStorage.getItem(UI_KEY)) || {}; } catch (e) { savedUi = {}; }
@@ -791,6 +793,138 @@ function patchChecklist() {
   document.querySelectorAll('[data-head]').forEach((el) => { el.innerHTML = statHead(el.dataset.head, date); });
 }
 
+/* Meals: each meal adds its protein and calories to the day's totals above. */
+const round1 = (x) => Math.round(x * 10) / 10;
+const mealsFor = (date) => (Array.isArray(dayRec(date).foods) ? dayRec(date).foods : [])
+  .filter((m) => m && typeof m === 'object' && m.id && typeof m.name === 'string');
+const mealMacros = (m) => `${fmtNum(m.protein || 0)} g protein · ${Math.round(m.calories || 0).toLocaleString()} cal${m.carbs != null ? ` · ${fmtNum(m.carbs)} g carbs` : ''}${m.fat != null ? ` · ${fmtNum(m.fat)} g fat` : ''}`;
+
+// Reads lines like "MEAL: Eggs & rice | 520 cal | 23 g protein | 46 g carbs | 27 g fat".
+// Also understands looser typing, e.g. "chicken thighs 30g protein 350 cal". One meal per line.
+function parseMeals(text) {
+  const out = [];
+  for (let line of String(text || '').split(/\r?\n/)) {
+    line = line.replace(/(\d),(\d{3})\b/g, '$1$2').trim();
+    if (!line) continue;
+    const grab = (...res) => {
+      for (const re of res) { const m = line.match(re); if (m) return Number(m[1]); }
+      return null;
+    };
+    const N = '(\\d+(?:\\.\\d+)?)';
+    const calories = grab(new RegExp(`${N}\\s*(?:k?cals?|kcal|calories)\\b`, 'i'), new RegExp(`(?:calories|cals?)\\s*[:=]?\\s*${N}`, 'i'));
+    const protein = grab(new RegExp(`${N}\\s*g?\\s*(?:of\\s+)?protein`, 'i'), new RegExp(`protein\\s*[:=]?\\s*${N}`, 'i'));
+    if (calories == null && protein == null) continue;
+    const carbs = grab(new RegExp(`${N}\\s*g?\\s*(?:of\\s+)?carb(?:s|ohydrates?)?`, 'i'), new RegExp(`carb(?:s|ohydrates?)?\\s*[:=]?\\s*${N}`, 'i'));
+    const fat = grab(new RegExp(`${N}\\s*g?\\s*(?:of\\s+)?fats?\\b`, 'i'), new RegExp(`fats?\\s*[:=]?\\s*${N}`, 'i'));
+    let name = line.replace(/^\W*meal\s*:\s*/i, '');
+    name = name.includes('|') ? name.split('|')[0] : name.split(/\d/)[0];
+    name = name.replace(/[\s,:;|–—-]+$/g, '').replace(/^[\s,:;|–—-]+/g, '').trim().slice(0, 40);
+    if (!name || /^(protein|calories|cals?|kcal|carbs?|fats?)\b/i.test(name)) name = 'Meal';
+    out.push({ name, protein: protein ?? 0, calories: calories ?? 0, carbs, fat });
+  }
+  return out;
+}
+
+function addMeals(date, meals) {
+  const r = data.daily[date] || (data.daily[date] = {});
+  const foods = Array.isArray(r.foods) ? r.foods : (r.foods = []);
+  for (const m of meals) {
+    foods.push({ id: uid(), name: m.name, protein: m.protein || 0, calories: m.calories || 0, carbs: m.carbs ?? null, fat: m.fat ?? null, ts: Date.now() });
+    r.protein = round1((r.protein || 0) + (m.protein || 0));
+    r.calories = Math.round((r.calories || 0) + (m.calories || 0));
+  }
+  save();
+}
+
+function removeMeal(date, id) {
+  const r = data.daily[date];
+  if (!r || !Array.isArray(r.foods)) return;
+  const i = r.foods.findIndex((m) => m.id === id);
+  if (i === -1) return;
+  const [m] = r.foods.splice(i, 1);
+  r.protein = Math.max(0, round1((r.protein || 0) - (m.protein || 0)));
+  r.calories = Math.max(0, Math.round((r.calories || 0) - (m.calories || 0)));
+  if (!r.foods.length) delete r.foods;
+  if (!r.protein) delete r.protein;
+  if (!r.calories) delete r.calories;
+  if (!Object.keys(r).length) delete data.daily[date];
+  save();
+  render();
+  toast(`Removed ${m.name}`, {
+    undo: () => {
+      const rr = data.daily[date] || (data.daily[date] = {});
+      (rr.foods || (rr.foods = [])).splice(i, 0, m);
+      rr.protein = round1((rr.protein || 0) + (m.protein || 0));
+      rr.calories = Math.round((rr.calories || 0) + (m.calories || 0));
+      save();
+      render();
+    },
+  });
+}
+
+// Meals from the last 3 weeks, newest first, one per name, for one-tap "eat it again".
+function recentMeals(date) {
+  const seen = new Set();
+  const out = [];
+  for (let i = 0; i <= 21 && out.length < 6; i++) {
+    const d = addDays(date, -i);
+    for (const m of mealsFor(d).slice().reverse()) {
+      const k = norm(m.name);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out.push(m);
+      if (out.length >= 6) break;
+    }
+  }
+  return out;
+}
+
+function addMealsFromText(text) {
+  const meals = parseMeals(text);
+  if (!meals.length) {
+    toast('No numbers found. Paste the line from Meal → Macros, or type e.g. "chicken 30 g protein 350 cal".', { ms: 5000 });
+    return false;
+  }
+  addMeals(today(), meals);
+  ui.mealBox = false;
+  ui.mealDraft = '';
+  render();
+  const p = sum(meals.map((m) => m.protein || 0));
+  const c = sum(meals.map((m) => m.calories || 0));
+  toast(`Added ${meals.length === 1 ? meals[0].name : plural(meals.length, 'meal')}: +${fmtNum(p)} g protein, +${Math.round(c).toLocaleString()} cal`);
+  return true;
+}
+
+function renderMeals(date) {
+  const meals = mealsFor(date);
+  const recent = recentMeals(date);
+  const totP = sum(meals.map((m) => m.protein || 0));
+  const totC = sum(meals.map((m) => m.calories || 0));
+  let h = `<div class="card" id="meals">
+    <div class="row-between"><b>🍽 Meals</b><span class="muted small">${meals.length ? `${fmtNum(totP)} g · ${Math.round(totC).toLocaleString()} cal` : 'Adds to protein & calories'}</span></div>`;
+  if (meals.length) {
+    h += `<div class="meal-list">${meals.map((m) => `<div class="meal-row">
+        <div class="meal-txt"><b>${esc(m.name)}</b><div class="muted small">${mealMacros(m)}</div></div>
+        <button class="icon-btn small danger" data-action="meal-del" data-id="${esc(m.id)}" aria-label="Remove ${esc(m.name)}">✕</button>
+      </div>`).join('')}</div>`;
+  }
+  h += `<div class="row">
+      <a class="btn" href="${MEAL_PAGE_URL}" target="_blank" rel="noopener">📷 Photo</a>
+      <button class="btn primary" data-action="meal-paste">📋 Paste meal</button>
+    </div>`;
+  if (ui.mealBox) {
+    h += `<textarea id="meal-text" class="meal-text" rows="2" spellcheck="false" autocapitalize="off" placeholder="Paste here, or type: chicken thighs 30 g protein 350 cal">${esc(ui.mealDraft || '')}</textarea>
+      <div class="row"><button class="btn" data-action="meal-cancel">Cancel</button><button class="btn primary" data-action="meal-add">Add</button></div>`;
+  } else {
+    h += '<button class="link-btn" data-action="meal-type">or type one in</button>';
+  }
+  if (recent.length) {
+    h += `<div class="muted small" style="margin-top:6px">Eat it again:</div><div class="again">${recent.map((m) => `
+      <button class="chip-btn again-btn" data-action="meal-again" data-id="${esc(m.id)}">+ ${esc(m.name)} <span class="muted">${fmtNum(m.protein || 0)} g</span></button>`).join('')}</div>`;
+  }
+  return `${h}</div>`;
+}
+
 function renderChecklist() {
   const t = todayKey();
   const date = ui.checkDate || t;
@@ -808,6 +942,8 @@ function renderChecklist() {
   <div class="card" id="check-summary">${summaryHtml(date)}</div>
 
   ${checkRow(!!r.steps, 'data-action="toggle-daily" data-field="steps"', 'Walk 10,000 steps')}
+
+  ${renderMeals(date)}
 
   <div class="card">
     <div data-head="protein">${statHead('protein', date)}</div>
@@ -1109,6 +1245,8 @@ function weekSummary(mon) {
     if (r.waist != null) bits.push(`waist ${fmtNum(r.waist)} in`);
     if (pd && !future) pd.checklist.filter((x) => !isBuiltIn(x)).forEach((x) => bits.push(`${x} ${r.checks && r.checks[x] ? '✓' : '✗'}`));
     if (bits.length) lines.push(`  Daily: ${bits.join(', ')}`);
+    const meals = mealsFor(d);
+    if (meals.length) lines.push(`  Meals: ${meals.map((m) => `${m.name} (${fmtNum(m.protein || 0)} g protein, ${Math.round(m.calories || 0)} cal)`).join('; ')}`);
     if (!lines.length) lines.push(future ? '  (not yet)' : '  (nothing logged)');
     L.push(...lines);
   }
@@ -1505,6 +1643,33 @@ const actions = {
     setDaily(today(), 'backPain', dayRec(today()).backPain === n ? null : n);
     render();
   },
+  async 'meal-paste'() {
+    let text = '';
+    try { text = await navigator.clipboard.readText(); } catch (e) { text = ''; }
+    if (text && parseMeals(text).length) { addMealsFromText(text); return; }
+    ui.mealBox = true;
+    render();
+    const ta = $('#meal-text');
+    if (ta) ta.focus();
+    toast(text ? 'That didn\'t look like a meal line. Check it below.' : 'Long-press the box, tap Paste, then tap Add.', { ms: 4500 });
+    if (text && ta) { ta.value = text; ui.mealDraft = text; }
+  },
+  'meal-type'() {
+    ui.mealBox = true;
+    render();
+    const ta = $('#meal-text');
+    if (ta) ta.focus();
+  },
+  'meal-cancel'() { ui.mealBox = false; ui.mealDraft = ''; render(); },
+  'meal-add'() { addMealsFromText(($('#meal-text') || {}).value || ''); },
+  'meal-again'(el) {
+    const m = recentMeals(today()).find((x) => x.id === el.dataset.id);
+    if (!m) return;
+    addMeals(today(), [m]);
+    render();
+    toast(`Added ${m.name}: +${fmtNum(m.protein || 0)} g protein, +${Math.round(m.calories || 0).toLocaleString()} cal`);
+  },
+  'meal-del'(el) { removeMeal(today(), el.dataset.id); },
   'toggle-check'(el) {
     const checks = { ...(dayRec(today()).checks || {}) };
     const text = el.dataset.text;
@@ -1655,6 +1820,7 @@ document.addEventListener('input', (e) => {
   if (t.dataset.cf && ui.cardioForm) ui.cardioForm[t.dataset.cf] = t.value;
   if (t.dataset.gf && ui.goalForm) ui.goalForm[t.dataset.gf] = t.value;
   if (t.id === 'plan-text') ui.planDraft = t.value;
+  if (t.id === 'meal-text') ui.mealDraft = t.value;
 });
 // Finished typing in a box (you tapped away) or picked from a list: save it.
 document.addEventListener('change', (e) => {
