@@ -1,6 +1,6 @@
 'use strict';
 /* =====================================================================
-   Goals & Training Tracker — version 2
+   Goals & Training Tracker — version 2.2
    Everything is stored on this device (browser "localStorage").
    Sections:  1 settings · 2 helpers · 3 storage · 4 plan import
               5 training · 6 cardio · 7 rest timer · 8 checklist
@@ -9,7 +9,7 @@
    ===================================================================== */
 
 /* ---------- 1. Settings ---------- */
-const APP_VERSION = '2.1.0';
+const APP_VERSION = '2.2.0';
 const STORE_KEY = 'tracker.data.v1'; // (name kept from v1 so your data carries over)
 const UI_KEY = 'tracker.ui.v1';
 const BACKUP_KEY = 'tracker.lastBackup';
@@ -64,10 +64,21 @@ const show = (v) => (v === undefined ? 'nothing' : String(JSON.stringify(v)).sli
 const sum = (arr) => arr.reduce((a, b) => a + b, 0);
 const plural = (n, word) => `${fmtNum(n)} ${word}${n === 1 ? '' : 's'}`;
 const painColor = (n) => `hsl(${140 - (n - 1) * 15} 70% 55%)`;
+// Clock times are stored as "HH:MM" in 24-hour time, e.g. "08:30" or "21:30".
+const isHM = (s) => typeof s === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(s);
+const hmMin = (s) => Number(s.slice(0, 2)) * 60 + Number(s.slice(3));
+const minHM = (m) => { m = ((Math.round(m) % 1440) + 1440) % 1440; return `${pad(Math.floor(m / 60))}:${pad(m % 60)}`; };
+const fmtHM = (s) => { if (!isHM(s)) return '–'; const h = Number(s.slice(0, 2)); return `${h % 12 || 12}:${s.slice(3)} ${h < 12 ? 'am' : 'pm'}`; };
+const nowHM = () => { const d = new Date(); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
 
 /* ---------- 3. Storage ---------- */
 function blankData() {
-  return { app: 'goal-tracker', version: 2, plans: {}, sets: [], cardio: [], daily: {}, todos: [], goals: [] };
+  return {
+    app: 'goal-tracker', version: 2, plans: {}, sets: [], cardio: [], daily: {}, todos: [], goals: [],
+    dayEdits: {}, // v2.2: your swaps/adds/removes per day
+    times: [],    // v2.2: time goals ("out by 8:30") and what time you actually did it
+    lock: null,   // v2.2: scrambled copy of your private-list PIN (never the PIN itself)
+  };
 }
 // Cleans up data loaded from storage or a backup file so a bad entry can't crash the app.
 function normalizeData(d) {
@@ -88,6 +99,30 @@ function normalizeData(d) {
       .filter((g) => isObj(g) && g.id && typeof g.title === 'string' && GOAL_KINDS[g.kind] && Number(g.target) > 0)
       .map((g) => ({ ...g, log: isObj(g.log) ? g.log : {} }));
   }
+  if (isObj(d.dayEdits)) {
+    for (const [k, v] of Object.entries(d.dayEdits)) {
+      if (!isDateKey(k) || !isObj(v) || !Array.isArray(v.exercises)) continue;
+      out.dayEdits[k] = {
+        exercises: v.exercises.filter((e) => isObj(e) && typeof e.name === 'string' && e.name.trim()).map((e) => ({
+          ...e,
+          sets: Number.isInteger(Number(e.sets)) && Number(e.sets) >= 1 ? Number(e.sets) : 3,
+          reps: String(e.reps ?? ''),
+          restSec: Number(e.restSec) >= 0 ? Number(e.restSec) : 90,
+        })),
+        removed: Array.isArray(v.removed) ? v.removed.filter((x) => typeof x === 'string') : [],
+      };
+    }
+  }
+  if (Array.isArray(d.times)) {
+    out.times = d.times.filter((x) => isObj(x) && x.id && typeof x.title === 'string').map((x) => ({
+      ...x,
+      target: isHM(x.target) ? x.target : '',
+      days: Array.isArray(x.days) ? x.days.filter((n) => Number.isInteger(n) && n >= 0 && n <= 6) : [0, 1, 2, 3, 4, 5, 6],
+      once: isDateKey(x.once) ? x.once : null,
+      log: isObj(x.log) ? x.log : {},
+    }));
+  }
+  if (isObj(d.lock) && typeof d.lock.hash === 'string' && typeof d.lock.salt === 'string') out.lock = { hash: d.lock.hash, salt: d.lock.salt };
   return out;
 }
 function loadData() {
@@ -114,6 +149,7 @@ const ui = {
   tab: 'train', planWeek: null, trainDate: null, openEx: null, checkDate: null,
   todoFilter: 'All', todoCat: 'Personal', planDraft: '',
   cardioForm: null, goalForm: null, sumWeek: null, mealBox: false, mealDraft: '',
+  exForm: null, timeForm: null, pin: null, privView: false,
 };
 let savedUi = {};
 try { savedUi = JSON.parse(localStorage.getItem(UI_KEY)) || {}; } catch (e) { savedUi = {}; }
@@ -428,8 +464,13 @@ function renderDay(day) {
     <div><h3>${esc(day.name)}</h3><div class="muted small">${niceDate(day.date)}${day.date === todayKey() ? ' · Today' : ''}</div></div>
     <span class="badge ${esc(day.type)}">${esc(label)}</span>
   </section>`;
-  h += day.exercises.map((ex, i) => renderExercise(day, ex, i)).join('');
-  if (!day.exercises.length && !day.cardio.length) h += '<div class="card muted">Rest day. Walk, stretch, recover.</div>';
+  const exs = dayExercises(day);
+  const f = ui.exForm && ui.exForm.date === day.date ? ui.exForm : null;
+  h += exs.map((ex, i) => (f && f.i === i ? renderExForm(f) : renderExercise(day, ex, i))).join('');
+  if (!exs.length && !day.cardio.length) h += '<div class="card muted">Rest day. Walk, stretch, recover.</div>';
+  h += f && f.i === null ? renderExForm(f)
+    : `<button class="btn full add-ex" data-action="ex-add" data-date="${day.date}">+ Add exercise</button>`;
+  if (data.dayEdits[day.date]) h += `<button class="link-btn" data-action="ex-reset" data-date="${day.date}">↺ Undo my changes to this day</button>`;
   h += renderCardioSection(day);
   return h;
 }
@@ -449,6 +490,7 @@ function renderExercise(day, ex, i) {
       <div class="ex-main">
         <div class="ex-name">${esc(ex.name)}</div>
         <div class="ex-meta">${ex.sets} × ${esc(ex.reps)} · rest ${fmtSec(ex.restSec)}</div>
+        ${ex.from ? `<div class="ex-tag">↔ instead of ${esc(ex.from)}</div>` : ex.added ? '<div class="ex-tag">+ added by you</div>' : ''}
       </div>
       <div class="ex-count ${complete ? 'done' : ''}">${complete ? `✓ ${done.length}` : `${done.length}/${ex.sets}`}</div>
     </button>
@@ -485,6 +527,10 @@ function renderLogger(day, ex, i, key, done, last) {
     <span class="field-label">Reps in reserve (RIR)</span>
     <div class="rir-row">${[0, 1, 2, 3, 4, 5].map((n) => `<button class="rir ${d.rir === n ? 'active' : ''}" data-action="rir" data-key="${key}" data-n="${n}">${n === 5 ? '5+' : n}</button>`).join('')}</div>
     <button class="btn primary big full" data-action="log-set" data-key="${key}" data-date="${day.date}" data-i="${i}">Log set ${done.length + 1}</button>
+    <div class="row ex-tools">
+      <button class="btn" data-action="ex-edit" data-date="${day.date}" data-i="${i}">↔ Swap</button>
+      <button class="btn danger" data-action="ex-remove" data-date="${day.date}" data-i="${i}">Remove</button>
+    </div>
   </div>`;
   return h;
 }
@@ -492,7 +538,7 @@ function renderLogger(day, ex, i, key, done, last) {
 function logSet(key, date, i) {
   const plan = activePlan();
   const day = plan && plan.days.find((d) => d.date === date);
-  const ex = day && day.exercises[i];
+  const ex = day && dayExercises(day)[i];
   if (!ex) return;
   const d = drafts[key] || {};
   const w = num(d.weight);
@@ -505,6 +551,122 @@ function logSet(key, date, i) {
   toast(n >= ex.sets ? `✓ ${ex.name} done!` : `Set ${n} logged`);
   startTimer(ex.restSec, ex.name);
   render();
+}
+
+/* Your changes to a day's exercises (swap, add, remove). They're kept apart from the plan itself,
+   so they stay put even if the same week's plan gets imported again. */
+const REST_CHOICES = [45, 60, 90, 120, 150, 180];
+function exercisesOn(date, pd) {
+  const e = data.dayEdits[date];
+  return e ? e.exercises : pd ? pd.exercises : [];
+}
+const dayExercises = (day) => exercisesOn(day.date, day);
+// The day as the Train tab shows it.
+function trainDay(date) {
+  const p = activePlan();
+  return (p && p.days.find((d) => d.date === date)) || planDayFor(date);
+}
+// First change to a day: copy the plan's list so you can edit the copy.
+function editableDay(day) {
+  if (!data.dayEdits[day.date]) data.dayEdits[day.date] = { exercises: day.exercises.map((x) => ({ ...x })), removed: [] };
+  return data.dayEdits[day.date];
+}
+const snapshotEdits = (date) => (data.dayEdits[date] ? JSON.parse(JSON.stringify(data.dayEdits[date])) : null);
+function restoreEdits(date, snap) {
+  if (snap) data.dayEdits[date] = snap; else delete data.dayEdits[date];
+}
+// The typed-in weight/reps are remembered by position, so clear them when the list changes.
+function clearDrafts(date) {
+  Object.keys(drafts).forEach((k) => { if (k.startsWith(`${date}|`)) delete drafts[k]; });
+  ui.openEx = null;
+}
+function knownExerciseNames() {
+  const names = new Map();
+  for (const p of Object.values(data.plans)) for (const d of p.days) for (const e of d.exercises) names.set(norm(e.name), e.name);
+  for (const e of Object.values(data.dayEdits)) for (const x of e.exercises) names.set(norm(x.name), x.name);
+  for (const s of data.sets) names.set(norm(s.exercise), s.exercise);
+  return [...names.values()].sort((a, b) => a.localeCompare(b));
+}
+
+function renderExForm(f) {
+  const adding = f.i === null;
+  return `<div class="card ex-form" id="ex-form">
+    <h3>${adding ? 'Add an exercise' : 'Swap or change'}</h3>
+    ${!adding && f.orig ? `<div class="muted small">The plan says: ${esc(f.orig)}</div>` : ''}
+    <label class="field-label" for="exf-name">Exercise</label>
+    <input class="text" id="exf-name" type="text" list="ex-names" data-exf="name" value="${esc(f.name)}" placeholder="e.g. Preacher curl" autocomplete="off" maxlength="60">
+    <datalist id="ex-names">${knownExerciseNames().map((n) => `<option value="${esc(n)}">`).join('')}</datalist>
+    <span class="field-label">Sets</span>
+    <div class="stepper">
+      <button class="step" data-action="exf-sets" data-by="-1">−1</button>
+      <input class="num" type="number" inputmode="numeric" min="1" max="20" step="1" data-exf="sets" value="${esc(f.sets)}" aria-label="Sets">
+      <button class="step" data-action="exf-sets" data-by="1">+1</button>
+    </div>
+    <label class="field-label" for="exf-reps">Reps</label>
+    <input class="text" id="exf-reps" type="text" data-exf="reps" value="${esc(f.reps)}" placeholder="e.g. 8-10" autocomplete="off" maxlength="20">
+    <span class="field-label">Rest between sets</span>
+    <div class="rir-row">${REST_CHOICES.map((s) => `<button class="rir ${Number(f.restSec) === s ? 'active' : ''}" data-action="exf-rest" data-sec="${s}">${fmtSec(s)}</button>`).join('')}</div>
+    <div class="row">
+      <button class="btn" data-action="exf-cancel">Cancel</button>
+      <button class="btn primary" data-action="exf-save">${adding ? 'Add' : 'Save'}</button>
+    </div>
+  </div>`;
+}
+
+function saveExForm() {
+  const f = ui.exForm;
+  const day = f && trainDay(f.date);
+  if (!day) { ui.exForm = null; render(); return; }
+  const name = String(f.name || '').replace(/\s+/g, ' ').trim();
+  const sets = num(f.sets);
+  if (!name) { toast('Type the exercise name'); return; }
+  if (!Number.isInteger(sets) || sets < 1 || sets > 20) { toast('Sets should be a whole number from 1 to 20'); return; }
+  const reps = String(f.reps || '').trim() || '8-12';
+  const restSec = Math.round(num(f.restSec)) || 90;
+  const ed = editableDay(day);
+  let msg = 'Saved ✓';
+  if (f.i === null) {
+    ed.exercises.push({ name, sets, reps, restSec, start: '', notes: '', added: true });
+    msg = `Added ${name}`;
+  } else {
+    const ex = ed.exercises[f.i];
+    if (!ex) { ui.exForm = null; render(); return; }
+    const oldName = ex.name;
+    if (norm(oldName) !== norm(name)) {
+      if (!ex.added) {
+        const orig = ex.from || oldName;
+        if (norm(orig) === norm(name)) delete ex.from; else ex.from = orig;
+      }
+      // Sets you already logged today under the old name move over to the new name.
+      const moved = data.sets.filter((s) => s.date === f.date && norm(s.exercise) === norm(oldName));
+      const shared = ed.exercises.some((x, j) => j !== f.i && norm(x.name) === norm(oldName));
+      if (!shared) moved.forEach((s) => { s.exercise = name; });
+      msg = `Swapped to ${name}${moved.length && !shared ? ` (moved ${plural(moved.length, 'logged set')})` : ''}`;
+    }
+    Object.assign(ex, { name, sets, reps, restSec });
+  }
+  save();
+  clearDrafts(f.date);
+  ui.exForm = null;
+  render();
+  toast(msg);
+}
+
+function removeExercise(date, i) {
+  const day = trainDay(date);
+  if (!day) return;
+  const snap = snapshotEdits(date);
+  const ed = editableDay(day);
+  const [ex] = ed.exercises.splice(i, 1);
+  if (!ex) { restoreEdits(date, snap); return; }
+  if (!ex.added) ed.removed.push(ex.from || ex.name);
+  save();
+  clearDrafts(date);
+  render();
+  const n = setsFor(date, ex.name).length;
+  toast(`Removed ${ex.name}${n ? ` (your ${plural(n, 'set')} stay saved)` : ''}`, {
+    undo: () => { restoreEdits(date, snap); clearDrafts(date); save(); render(); },
+  });
 }
 
 /* ---------- 6. Cardio log ---------- */
@@ -1070,6 +1232,7 @@ function saveGoalForm() {
   const fields = {
     title, category: f.category, kind: f.kind,
     period: f.kind === 'workouts' ? 'week' : f.period, target, until: f.until || '',
+    hidden: !!f.hidden,
   };
   if (f.id) {
     const g = data.goals.find((x) => x.id === f.id);
@@ -1084,29 +1247,36 @@ function saveGoalForm() {
 }
 
 function renderGoals() {
+  if (ui.pin) return renderPinPad();
+  if (ui.privView && unlocked) return renderPrivate();
   const t = todayKey();
-  const active = data.goals.filter((g) => goalActive(g, t));
-  const ended = data.goals.filter((g) => !goalActive(g, t));
+  const goals = data.goals.filter((g) => !g.hidden);
+  const active = goals.filter((g) => goalActive(g, t));
+  const ended = goals.filter((g) => !goalActive(g, t));
+  const form = ui.goalForm && !ui.goalForm.hidden ? ui.goalForm : null;
   let h = `<div class="row-between"><h2>Goals</h2><span class="muted small">${niceDate(t)}</span></div>`;
-  if (ui.goalForm) h += renderGoalForm(ui.goalForm);
+  h += renderTimes(false);
+  if (form) h += renderGoalForm(form);
   h += active.map(renderGoalCard).join('');
-  if (!data.goals.length && !ui.goalForm) {
+  if (!goals.length && !form) {
     h += `<div class="card muted small">Recurring goals track things like “work out 4 days a week” or “study 1 hour a day”, and show how you're doing this week.
       <br><button class="link-btn" data-action="goal-examples">Add those two to start</button></div>`;
   }
-  if (!ui.goalForm) h += '<button class="btn full" data-action="goal-new">+ New recurring goal</button>';
+  if (!form) h += '<button class="btn full" data-action="goal-new">+ New recurring goal</button>';
   if (ended.length) h += `<details class="ended"><summary>Ended goals (${ended.length})</summary>${ended.map(renderGoalCard).join('')}</details>`;
-  h += `<div class="section"><h3 class="section-title">To-Do today</h3>${renderTodoBody()}</div>`;
+  h += `<div class="section"><h3 class="section-title">To-Do today</h3>${renderTodoBody(false)}</div>`;
+  h += '<div class="lock-spot"><button class="lock-btn" data-action="priv-open" aria-label="Private">🔒</button></div>';
   return h;
 }
 
-function renderTodoBody() {
+function renderTodoBody(hidden = false) {
   const t = todayKey();
   const f = ui.todoFilter;
   const match = (x) => f === 'All' || x.category === f;
-  const open = data.todos.filter((x) => !x.done && x.date <= t)
+  const todos = data.todos.filter((x) => !!x.hidden === hidden);
+  const open = todos.filter((x) => !x.done && x.date <= t)
     .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : (a.created || 0) - (b.created || 0)));
-  const doneToday = data.todos.filter((x) => x.done && x.doneDate === t);
+  const doneToday = todos.filter((x) => x.done && x.doneDate === t);
 
   const row = (x) => `<div class="todo cat-${slug(x.category || 'Personal')} ${x.done ? 'done' : ''}">
     <button class="todo-check" data-action="todo-toggle" data-id="${x.id}">
@@ -1144,11 +1314,257 @@ function addTodo() {
   ui.todoCat = cat;
   if (ui.todoFilter !== 'All' && ui.todoFilter !== cat) ui.todoFilter = 'All';
   saveUi();
-  data.todos.push({ id: uid(), text, category: cat, date: todayKey(), done: false, doneDate: null, created: Date.now() });
+  const todo = { id: uid(), text, category: cat, date: todayKey(), done: false, doneDate: null, created: Date.now() };
+  if (ui.privView && unlocked) todo.hidden = true;
+  data.todos.push(todo);
   save();
   render();
   const again = $('#todo-text');
   if (again) again.focus(); // keep the keyboard up so you can add several in a row
+}
+
+/* ---------- 9b. Time goals ("out of the apartment by 8:30", "woke up at…") ---------- */
+// A day of times runs until 4 am, so putting your phone away at 12:30 am still counts for the night before.
+const TIME_DAY_ENDS_H = 4;
+const timeDay = () => toKey(new Date(Date.now() - TIME_DAY_ENDS_H * 3600000));
+const ALL_DAYS = [0, 1, 2, 3, 4, 5, 6];
+const timeOn = (x, date) => (x.once ? x.once === date : x.days.includes(fromKey(date).getDay()) && (!x.created || date >= x.created));
+// Minutes late (+) or early (−) compared with the goal time. Works across midnight.
+function minutesOff(x, actual) {
+  if (!isHM(x.target) || !isHM(actual)) return null;
+  let d = hmMin(actual) - hmMin(x.target);
+  if (d > 720) d -= 1440;
+  if (d < -720) d += 1440;
+  return d;
+}
+const fmtMins = (m) => (m >= 60 ? `${Math.floor(m / 60)} h${m % 60 ? ` ${m % 60} min` : ''}` : `${m} min`);
+function offText(d) {
+  if (d === null) return '';
+  if (d === 0) return '<span class="good-text">right on time</span>';
+  return d < 0 ? `<span class="good-text">${fmtMins(-d)} early</span>` : `<span class="warn-text">${fmtMins(d)} late</span>`;
+}
+function avgHM(list) {
+  let m = list.map(hmMin);
+  // Around midnight (e.g. 11:50 pm and 12:20 am), count the after-midnight ones as late night.
+  if (m.some((v) => v >= 18 * 60) && m.some((v) => v < 6 * 60)) m = m.map((v) => (v < 6 * 60 ? v + 1440 : v));
+  return minHM(sum(m) / m.length);
+}
+function timeWeek(x, mon, upTo) {
+  const days = weekDates(mon).filter((d) => d <= upTo && timeOn(x, d));
+  const logged = days.filter((d) => isHM(x.log[d]));
+  const offs = logged.map((d) => minutesOff(x, x.log[d])).filter((v) => v !== null);
+  return { days, logged, onTime: offs.filter((v) => v <= 0).length, avg: logged.length ? avgHM(logged.map((d) => x.log[d])) : null };
+}
+function daysText(x) {
+  if (x.once) return `only ${niceDate(x.once)}`;
+  const s = x.days.slice().sort().join('');
+  if (s === '0123456') return 'every day';
+  if (s === '12345') return 'weekdays';
+  if (s === '06') return 'weekends';
+  return [1, 2, 3, 4, 5, 6, 0].filter((n) => x.days.includes(n)).map((n) => DOW[n]).join(', ');
+}
+
+function timeRow(x, date, live) {
+  if (ui.timeForm && ui.timeForm.id === x.id) return renderTimeForm(ui.timeForm);
+  const actual = live ? x.log[date] : null;
+  const off = minutesOff(x, actual);
+  let sub = x.target ? `Goal ${fmtHM(x.target)}` : 'Just recording the time';
+  if (off !== null) sub += ` · ${offText(off)}`;
+  if (!live) sub = `${x.target ? `Goal ${fmtHM(x.target)} · ` : ''}${daysText(x)}`;
+  let wk = '';
+  if (live) {
+    const w = timeWeek(x, mondayOf(date), date);
+    if (w.logged.length >= 2) {
+      wk = x.target ? `This week: on time ${w.onTime} of ${w.logged.length} · avg ${fmtHM(w.avg)}` : `This week: avg ${fmtHM(w.avg)} (${w.logged.length} days)`;
+    }
+  }
+  const right = !live ? ''
+    : isHM(actual)
+      ? `<input class="time-in" type="time" data-time-id="${esc(x.id)}" value="${actual}" aria-label="Time for ${esc(x.title)}">
+         <button class="icon-btn small" data-action="time-clear" data-id="${esc(x.id)}" aria-label="Clear time">✕</button>`
+      : `<button class="btn primary now-btn" data-action="time-now" data-id="${esc(x.id)}">Now</button>`;
+  return `<div class="time-row ${isHM(actual) ? (off !== null && off > 0 ? 'late' : 'ok') : ''}">
+    <button class="time-txt" data-action="time-edit" data-id="${esc(x.id)}" aria-label="Edit ${esc(x.title)}">
+      <b>${esc(x.title)} <span class="edit-ico">✎</span></b>
+      <span class="muted small">${sub}</span>
+      ${wk ? `<span class="muted small">${wk}</span>` : ''}
+    </button>
+    ${right}
+  </div>`;
+}
+
+function renderTimes(hidden) {
+  const date = timeDay();
+  const all = data.times.filter((x) => !!x.hidden === hidden);
+  const key = (x) => x.target || '00:00'; // no goal time (like "Woke up") goes first
+  const todays = all.filter((x) => timeOn(x, date)).sort((a, b) => (key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0));
+  const others = all.filter((x) => !timeOn(x, date) && !(x.once && x.once < date));
+  const newForm = ui.timeForm && !ui.timeForm.id && !!ui.timeForm.hidden === hidden;
+  let h = `<div class="card times">
+    <div class="row-between"><b>⏰ Times</b><span class="muted small">${date === todayKey() ? 'today' : `${niceDate(date)} (until 4 am)`}</span></div>`;
+  h += todays.map((x) => timeRow(x, date, true)).join('');
+  if (!all.length && !newForm) {
+    h += `<p class="muted small">Set a time you want to do something by, then tap <b>Now</b> when you do it. Leave the goal time empty to just record a time, like when you woke up.</p>
+      ${hidden ? '' : '<button class="link-btn" data-action="time-examples">Add: Woke up · Out of the apartment by 8:30 am · Phone put away by 9:30 pm</button>'}`;
+  } else if (!todays.length && !newForm) {
+    h += '<p class="muted small">Nothing set for today.</p>';
+  }
+  h += newForm ? renderTimeForm(ui.timeForm)
+    : `<button class="btn full" data-action="time-new" ${hidden ? 'data-hidden="1"' : ''}>+ Add a time</button>`;
+  if (others.length) h += `<details class="ended"><summary>Not on today (${others.length})</summary>${others.map((x) => timeRow(x, date, false)).join('')}</details>`;
+  return `${h}</div>`;
+}
+
+function renderTimeForm(f) {
+  const presets = [['all', 'Every day', !f.once && f.days.length === 7], ['week', 'Weekdays', !f.once && f.days.slice().sort().join('') === '12345'], ['once', 'Today only', !!f.once]];
+  return `<div class="time-form" id="time-form">
+    <h3>${f.id ? 'Edit time' : 'New time'}</h3>
+    <label class="field-label" for="tf-title">What</label>
+    <input class="text" id="tf-title" type="text" data-tf="title" value="${esc(f.title)}" placeholder="e.g. Out of the apartment" maxlength="60" autocomplete="off">
+    <label class="field-label" for="tf-target">Goal time (optional)</label>
+    <div class="quick" style="margin-top:0">
+      <input class="text time-goal" id="tf-target" type="time" data-tf="target" value="${esc(f.target)}">
+      ${f.target ? '<button class="btn" data-action="tf-notarget">No goal</button>' : ''}
+    </div>
+    <div class="muted small" style="margin-top:6px">No goal time = just record when (like waking up).</div>
+    <span class="field-label">Which days</span>
+    <div class="opts3">${presets.map(([p, label, on]) => `<button class="opt ${on ? 'active' : ''}" data-action="tf-preset" data-p="${p}">${label}</button>`).join('')}</div>
+    ${f.once ? '' : `<div class="dow-row">${[1, 2, 3, 4, 5, 6, 0].map((n) => `<button class="rir ${f.days.includes(n) ? 'active' : ''}" data-action="tf-day" data-n="${n}" aria-label="${DOW[n]}">${DOW[n].slice(0, 2)}</button>`).join('')}</div>`}
+    <div class="row">
+      ${f.id ? '<button class="btn danger" data-action="tf-delete">Delete</button>' : ''}
+      <button class="btn" data-action="tf-cancel">Cancel</button>
+      <button class="btn primary" data-action="tf-save">Save</button>
+    </div>
+  </div>`;
+}
+
+function saveTimeForm() {
+  const f = ui.timeForm;
+  const title = String(f.title || '').trim();
+  if (!title) { toast('Give it a name, like "Out of the apartment"'); return; }
+  if (f.target && !isHM(f.target)) { toast('That goal time doesn\'t look right'); return; }
+  if (!f.once && !f.days.length) { toast('Pick at least one day'); return; }
+  const fields = { title, target: f.target || '', days: f.days.slice().sort(), once: f.once || null, hidden: !!f.hidden };
+  if (f.id) {
+    const x = data.times.find((y) => y.id === f.id);
+    if (x) Object.assign(x, fields);
+  } else {
+    data.times.push({ id: uid(), created: timeDay(), log: {}, ...fields });
+  }
+  save();
+  ui.timeForm = null;
+  render();
+  toast('Saved ✓');
+}
+
+function setTimeLog(id, value) {
+  const x = data.times.find((y) => y.id === id);
+  if (!x) return;
+  const date = timeDay();
+  if (isHM(value)) x.log[date] = value; else delete x.log[date];
+  save();
+  render();
+}
+
+/* ---------- 9c. Private list (behind a PIN) ----------
+   You choose the PIN on your phone. Only a scrambled "hash" of it is saved (a one-way fingerprint:
+   the app can check a PIN against it, but nobody can turn it back into the PIN), so the PIN is
+   never in the app's code, which is public on GitHub.
+   This keeps out someone who picks up your phone. It is not encryption: private items are still
+   inside your backup files. */
+let unlocked = false;
+let pinFails = 0;
+let pinBlockedUntil = 0;
+
+async function pinHash(pin, salt) {
+  const bytes = new TextEncoder().encode(`${salt}:${pin}`);
+  if (window.crypto && crypto.subtle) {
+    const buf = await crypto.subtle.digest('SHA-256', bytes);
+    return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
+  }
+  let h = 2166136261; // fallback for pages without https (only when testing on a laptop)
+  for (const b of bytes) { h ^= b; h = Math.imul(h, 16777619); }
+  return `f${(h >>> 0).toString(16)}`;
+}
+function lockPrivate() {
+  unlocked = false;
+  ui.privView = false;
+  ui.pin = null;
+  if (ui.goalForm && ui.goalForm.hidden) ui.goalForm = null;
+  if (ui.timeForm && ui.timeForm.hidden) ui.timeForm = null;
+}
+
+function renderPinPad() {
+  const p = ui.pin;
+  const title = { unlock: 'Enter your PIN', set: 'Choose a 4-digit PIN', confirm: 'Type the same PIN again', old: 'Enter your current PIN' }[p.mode];
+  const hint = p.msg || (p.mode === 'set' ? 'This PIN opens your private list. Only a scrambled copy is saved on this phone.' : '');
+  const keys = ['1', '2', '3', '4', '5', '6', '7', '8', '9', 'cancel', '0', 'back'];
+  return `<div class="pin-wrap">
+    <div class="pin-ico">🔒</div>
+    <h2>${title}</h2>
+    <p class="small pin-msg ${p.bad ? 'warn-text' : 'muted'}">${esc(hint)}</p>
+    <div class="pin-dots">${[0, 1, 2, 3].map((i) => `<i class="${i < p.entry.length ? 'on' : ''}"></i>`).join('')}</div>
+    <div class="pin-pad">${keys.map((k) => (k === 'cancel' ? '<button class="pin-key fn" data-action="pin-cancel">Cancel</button>'
+      : k === 'back' ? '<button class="pin-key fn" data-action="pin-back" aria-label="Delete a digit">⌫</button>'
+        : `<button class="pin-key" data-action="pin-key" data-k="${k}">${k}</button>`)).join('')}</div>
+    ${p.mode === 'unlock' ? '<button class="link-btn" data-action="pin-forgot">Forgot PIN?</button>' : ''}
+  </div>`;
+}
+
+async function pinEntered() {
+  const p = ui.pin;
+  if (!p) return;
+  const pin = p.entry;
+  if (p.mode === 'unlock' || p.mode === 'old') {
+    const ok = data.lock && (await pinHash(pin, data.lock.salt)) === data.lock.hash;
+    if (!ok) {
+      pinFails += 1;
+      p.entry = '';
+      p.bad = true;
+      if (pinFails >= 5) { pinFails = 0; pinBlockedUntil = Date.now() + 30000; p.msg = 'Too many tries. Wait 30 seconds.'; } else p.msg = 'Wrong PIN. Try again.';
+      render();
+      return;
+    }
+    pinFails = 0;
+    if (p.mode === 'old') { ui.pin = { mode: 'set', entry: '', msg: 'Now choose your new PIN.' }; render(); return; }
+    unlocked = true;
+    ui.pin = null;
+    ui.privView = true;
+    render();
+    window.scrollTo(0, 0);
+    return;
+  }
+  if (p.mode === 'set') { ui.pin = { mode: 'confirm', entry: '', first: pin }; render(); return; }
+  if (p.mode === 'confirm') {
+    if (pin !== p.first) { ui.pin = { mode: 'set', entry: '', msg: 'Those didn\'t match. Choose your PIN again.', bad: true }; render(); return; }
+    const salt = uid() + uid();
+    data.lock = { salt, hash: await pinHash(pin, salt) };
+    save();
+    unlocked = true;
+    ui.pin = null;
+    ui.privView = true;
+    render();
+    window.scrollTo(0, 0);
+    toast('PIN saved ✓ Remember it!', { ms: 3500 });
+  }
+}
+
+function renderPrivate() {
+  const t = todayKey();
+  const goals = data.goals.filter((g) => g.hidden);
+  const active = goals.filter((g) => goalActive(g, t));
+  const ended = goals.filter((g) => !goalActive(g, t));
+  const form = ui.goalForm && ui.goalForm.hidden ? ui.goalForm : null;
+  let h = `<div class="row-between priv-head"><h2>🔒 Private</h2><button class="btn" data-action="priv-lock">Lock</button></div>
+    <p class="muted small">Only you can open this, with your PIN. It locks itself when you switch tabs or leave the app. Nothing here goes in the coach summary.</p>`;
+  h += renderTimes(true);
+  if (form) h += renderGoalForm(form);
+  h += active.map(renderGoalCard).join('');
+  if (!form) h += '<button class="btn full" data-action="goal-new" data-hidden="1">+ New private goal</button>';
+  if (ended.length) h += `<details class="ended"><summary>Ended goals (${ended.length})</summary>${ended.map(renderGoalCard).join('')}</details>`;
+  h += `<div class="section"><h3 class="section-title">Private to-do</h3>${renderTodoBody(true)}</div>`;
+  h += '<button class="link-btn" data-action="pin-change">Change PIN</button>';
+  return h;
 }
 
 /* ---------- 10. Progress & weekly check-in for your coach ---------- */
@@ -1212,13 +1628,16 @@ function weekSummary(mon) {
     L.push('');
     L.push(`${niceDate(d)}${pd ? ` - ${pd.name} (${pd.type})` : ''}`);
     const lines = [];
-    const planned = pd ? pd.exercises : [];
+    const planned = exercisesOn(d, pd);
     const plannedNames = new Set(planned.map((e) => norm(e.name)));
     for (const ex of planned) {
       const sets = setsFor(d, ex.name);
-      if (sets.length) lines.push(`  ${ex.name} (plan ${ex.sets}×${ex.reps}): ${sets.map(fmtSetCoach).join(', ')}${hitTop(sets, ex) ? ' - top of range on all sets' : ''}`);
-      else if (!future) lines.push(`  ${ex.name} (plan ${ex.sets}×${ex.reps}): not done`);
+      const label = `${ex.name} (${ex.added ? 'added by me, ' : 'plan '}${ex.sets}×${ex.reps}${ex.from ? `, swapped in for ${ex.from}` : ''})`;
+      if (sets.length) lines.push(`  ${label}: ${sets.map(fmtSetCoach).join(', ')}${hitTop(sets, ex) ? ' - top of range on all sets' : ''}`);
+      else if (!future) lines.push(`  ${label}: not done`);
     }
+    const ed = data.dayEdits[d];
+    if (ed && ed.removed.length) lines.push(`  Removed from the plan: ${ed.removed.join(', ')}`);
     const extra = new Map();
     data.sets.filter((s) => s.date === d && !plannedNames.has(norm(s.exercise))).sort((a, b) => a.ts - b.ts).forEach((s) => {
       if (!extra.has(s.exercise)) extra.set(s.exercise, []);
@@ -1252,13 +1671,33 @@ function weekSummary(mon) {
   }
 
   // Goals
-  const gs = data.goals.filter((g) => (!g.until || g.until >= mon) && (!g.created || g.created <= end));
+  const gs = data.goals.filter((g) => !g.hidden && (!g.until || g.until >= mon) && (!g.created || g.created <= end));
   if (gs.length) {
     L.push('');
     L.push('GOALS');
     gs.forEach((g) => {
       const w = goalWeek(g, mon, end < t ? end : t);
       L.push(`  ${g.title} (${goalTargetText(g)}): ${g.period === 'day' ? `hit ${w.hit} of ${plural(w.days, 'day')}, ${fmtNum(w.total)} ${goalUnit(g)} total` :`${fmtNum(w.done)}/${fmtNum(g.target)} ${goalUnit(g)}${w.met ? ' ✓' : ''}`}`);
+    });
+  }
+
+  // Times (private ones are left out)
+  const upTo = end < timeDay() ? end : timeDay();
+  const ts = data.times.filter((x) => !x.hidden && dates.some((d) => d <= upTo && timeOn(x, d)));
+  if (ts.length) {
+    L.push('');
+    L.push('TIMES (actual, with minutes late + or early − vs the goal)');
+    ts.forEach((x) => {
+      const w = timeWeek(x, mon, upTo);
+      const parts = w.days.map((d) => {
+        const a = x.log[d];
+        if (!isHM(a)) return `${dayName(d)} –`;
+        const off = minutesOff(x, a);
+        return `${dayName(d)} ${fmtHM(a)}${off ? ` (${off > 0 ? '+' : '−'}${Math.abs(off)})` : ''}`;
+      });
+      let line = `  ${x.title}${x.target ? ` (goal ${fmtHM(x.target)})` : ''}: ${parts.join(', ')}`;
+      if (w.logged.length) line += x.target ? `. On time ${w.onTime}/${w.logged.length}, avg ${fmtHM(w.avg)}` : `. Avg ${fmtHM(w.avg)}`;
+      L.push(line);
     });
   }
   return L.join('\n');
@@ -1332,7 +1771,7 @@ function renderProgress() {
       <div class="week-title"><b>Weekly check-in</b><div class="muted small">${shortDate(mon)} – ${shortDate(addDays(mon, 6))}${mon === thisMon ? ' (this week)' : ''}</div></div>
       <button class="icon-btn" data-action="sum-week" data-by="7" ${mon >= thisMon ? 'disabled' : ''} aria-label="Next week">›</button>
     </div>
-    <p class="muted small">Copies the whole week as text (sets, cardio, back pain, weight, food, goals) so you can paste it to your coach on Sunday.</p>
+    <p class="muted small">Copies the whole week as text (sets, cardio, back pain, weight, food, goals, times) so you can paste it to your coach on Sunday.</p>
     <button class="btn primary big full" data-action="copy-summary">📋 Copy summary for coach</button>
     ${navigator.share ? '<button class="btn full" data-action="share-summary">📤 Share summary…</button>' : ''}
     <details class="preview" id="summary-preview"><summary>Preview the text</summary><pre class="summary-pre">${esc(weekSummary(mon))}</pre></details>
@@ -1425,7 +1864,7 @@ function backupBlob() {
   return new Blob([JSON.stringify({ ...data, exportedAt: new Date().toISOString(), appVersion: APP_VERSION })], { type: 'application/json' });
 }
 const backupName = () => `tracker-backup-${todayKey()}.json`;
-const countsText = (d) => `${d.sets.length} sets · ${d.cardio.length} cardio · ${Object.keys(d.plans).length} plans · ${d.goals.length} goals · ${d.todos.length} to-dos · ${Object.keys(d.daily).length} checklist days`;
+const countsText = (d) => `${d.sets.length} sets · ${d.cardio.length} cardio · ${Object.keys(d.plans).length} plans · ${d.goals.length} goals · ${d.times.length} times · ${d.todos.length} to-dos · ${Object.keys(d.daily).length} checklist days`;
 
 function saveBackupFile() {
   const url = URL.createObjectURL(backupBlob());
@@ -1465,6 +1904,9 @@ async function restoreFromFile(file) {
   ui.trainDate = null;
   ui.cardioForm = null;
   ui.goalForm = null;
+  ui.exForm = null;
+  ui.timeForm = null;
+  lockPrivate();
   render();
   toast('Backup restored ✓');
 }
@@ -1550,13 +1992,56 @@ const actions = {
   tab(el) {
     ui.tab = el.dataset.tab === 'todo' ? 'goals' : el.dataset.tab;
     importResult = null;
+    lockPrivate(); // switching tabs locks the private list
     saveUi();
     render();
     window.scrollTo(0, 0);
   },
   // Training
-  'plan-week'(el) { ui.planWeek = el.dataset.week || null; ui.trainDate = null; ui.openEx = null; ui.cardioForm = null; render(); },
-  'train-day'(el) { ui.trainDate = el.dataset.date; ui.openEx = null; ui.cardioForm = null; render(); },
+  'plan-week'(el) { ui.planWeek = el.dataset.week || null; ui.trainDate = null; ui.openEx = null; ui.cardioForm = null; ui.exForm = null; render(); },
+  'train-day'(el) { ui.trainDate = el.dataset.date; ui.openEx = null; ui.cardioForm = null; ui.exForm = null; render(); },
+  'ex-edit'(el) {
+    const day = trainDay(el.dataset.date);
+    const i = Number(el.dataset.i);
+    const ex = day && dayExercises(day)[i];
+    if (!ex) return;
+    ui.exForm = { date: day.date, i, name: ex.name, sets: String(ex.sets), reps: ex.reps, restSec: ex.restSec, orig: ex.added ? '' : ex.from || ex.name };
+    ui.openEx = null;
+    render();
+    const f = $('#ex-form');
+    if (f) f.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    const n = $('#exf-name');
+    if (n) { n.focus(); n.select(); }
+  },
+  'ex-add'(el) {
+    ui.exForm = { date: el.dataset.date, i: null, name: '', sets: '3', reps: '10-12', restSec: 90 };
+    ui.openEx = null;
+    render();
+    const f = $('#ex-form');
+    if (f) f.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    const n = $('#exf-name');
+    if (n) n.focus();
+  },
+  'exf-sets'(el) {
+    const f = ui.exForm;
+    f.sets = String(Math.min(20, Math.max(1, Math.round(num(f.sets) || 0) + Number(el.dataset.by))));
+    render();
+  },
+  'exf-rest'(el) { ui.exForm.restSec = Number(el.dataset.sec); render(); },
+  'exf-cancel'() { ui.exForm = null; render(); },
+  'exf-save'() { saveExForm(); },
+  'ex-remove'(el) { removeExercise(el.dataset.date, Number(el.dataset.i)); },
+  'ex-reset'(el) {
+    const date = el.dataset.date;
+    if (!data.dayEdits[date] || !confirm('Put this day back the way the plan has it?\n\nYour logged sets stay saved.')) return;
+    const snap = snapshotEdits(date);
+    delete data.dayEdits[date];
+    save();
+    clearDrafts(date);
+    ui.exForm = null;
+    render();
+    toast('Back to the plan', { undo: () => { restoreEdits(date, snap); clearDrafts(date); save(); render(); } });
+  },
   'toggle-ex'(el) {
     const key = el.dataset.key;
     ui.openEx = ui.openEx === key ? null : key;
@@ -1688,8 +2173,8 @@ const actions = {
     save();
     render();
   },
-  'goal-new'() {
-    ui.goalForm = { id: null, title: '', category: ui.todoCat, kind: 'count', period: 'week', target: '3', until: '' };
+  'goal-new'(el) {
+    ui.goalForm = { id: null, title: '', category: ui.todoCat, kind: 'count', period: 'week', target: '3', until: '', hidden: el.dataset.hidden === '1' };
     render();
     const f = $('#gf-title');
     if (f) f.focus();
@@ -1697,7 +2182,7 @@ const actions = {
   'goal-edit'(el) {
     const g = data.goals.find((x) => x.id === el.dataset.id);
     if (!g) return;
-    ui.goalForm = { id: g.id, title: g.title, category: g.category, kind: g.kind, period: g.period, target: String(g.target), until: g.until || '' };
+    ui.goalForm = { id: g.id, title: g.title, category: g.category, kind: g.kind, period: g.period, target: String(g.target), until: g.until || '', hidden: !!g.hidden };
     render();
     const f = $('#goal-form');
     if (f) f.scrollIntoView({ block: 'start', behavior: 'smooth' });
@@ -1728,6 +2213,113 @@ const actions = {
     save();
     render();
     toast('Added. Tap Edit on either one to change it.');
+  },
+
+  // Times
+  'time-now'(el) {
+    const x = data.times.find((y) => y.id === el.dataset.id);
+    if (!x) return;
+    const date = timeDay();
+    x.log[date] = nowHM();
+    save();
+    render();
+    const off = minutesOff(x, x.log[date]);
+    toast(`${x.title}: ${fmtHM(x.log[date])}${off === null ? '' : off <= 0 ? ' ✓ on time' : `, ${fmtMins(off)} late`}. Tap the time to change it.`, { ms: 3500 });
+  },
+  'time-clear'(el) {
+    const x = data.times.find((y) => y.id === el.dataset.id);
+    const date = timeDay();
+    if (!x || !x.log[date]) return;
+    const old = x.log[date];
+    delete x.log[date];
+    save();
+    render();
+    toast('Time cleared', { undo: () => { x.log[date] = old; save(); render(); } });
+  },
+  'time-new'(el) {
+    ui.timeForm = { id: null, title: '', target: '', days: ALL_DAYS.slice(), once: null, hidden: el.dataset.hidden === '1' };
+    render();
+    const n = $('#tf-title');
+    if (n) n.focus();
+  },
+  'time-edit'(el) {
+    const x = data.times.find((y) => y.id === el.dataset.id);
+    if (!x) return;
+    ui.timeForm = { id: x.id, title: x.title, target: x.target, days: x.days.slice(), once: x.once, hidden: !!x.hidden };
+    render();
+    const f = $('#time-form');
+    if (f) f.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  },
+  'tf-notarget'() { ui.timeForm.target = ''; render(); },
+  'tf-preset'(el) {
+    const f = ui.timeForm;
+    const p = el.dataset.p;
+    if (p === 'once') { f.once = f.once || timeDay(); return render(); }
+    f.once = null;
+    f.days = p === 'week' ? [1, 2, 3, 4, 5] : ALL_DAYS.slice();
+    render();
+  },
+  'tf-day'(el) {
+    const f = ui.timeForm;
+    const n = Number(el.dataset.n);
+    f.days = f.days.includes(n) ? f.days.filter((d) => d !== n) : [...f.days, n];
+    render();
+  },
+  'tf-cancel'() { ui.timeForm = null; render(); },
+  'tf-save'() { saveTimeForm(); },
+  'tf-delete'() {
+    const i = data.times.findIndex((y) => y.id === ui.timeForm.id);
+    if (i === -1) return;
+    const [removed] = data.times.splice(i, 1);
+    ui.timeForm = null;
+    save();
+    render();
+    toast(`Deleted ${removed.title}`, { undo: () => { data.times.splice(i, 0, removed); save(); render(); } });
+  },
+  'time-examples'() {
+    const t = timeDay();
+    const mk = (title, target) => ({ id: uid(), created: t, log: {}, title, target, days: ALL_DAYS.slice(), once: null, hidden: false });
+    data.times.push(mk('Woke up', ''), mk('Out of the apartment', '08:30'), mk('Phone put away', '21:30'));
+    save();
+    render();
+    toast('Added. Tap a name to change its time or days.', { ms: 3500 });
+  },
+
+  // Private list
+  'priv-open'() {
+    if (unlocked) ui.privView = true;
+    else ui.pin = { mode: data.lock ? 'unlock' : 'set', entry: '' };
+    ui.goalForm = null;
+    ui.timeForm = null;
+    render();
+    window.scrollTo(0, 0);
+  },
+  'priv-lock'() { lockPrivate(); render(); window.scrollTo(0, 0); toast('Locked 🔒'); },
+  'pin-key'(el) {
+    const p = ui.pin;
+    if (!p || p.busy || p.entry.length >= 4) return;
+    if (Date.now() < pinBlockedUntil) { toast('Wait a few seconds, then try again.'); return; }
+    p.entry += el.dataset.k;
+    if (p.entry.length === 1) { p.msg = ''; p.bad = false; }
+    render();
+    if (p.entry.length === 4) {
+      p.busy = true;
+      setTimeout(() => { p.busy = false; pinEntered(); }, 150);
+    }
+  },
+  'pin-back'() { const p = ui.pin; if (p && !p.busy) { p.entry = p.entry.slice(0, -1); render(); } },
+  'pin-cancel'() { ui.pin = null; render(); },
+  'pin-change'() { ui.pin = { mode: 'old', entry: '' }; render(); window.scrollTo(0, 0); },
+  'pin-forgot'() {
+    const n = data.goals.filter((g) => g.hidden).length + data.times.filter((x) => x.hidden).length + data.todos.filter((x) => x.hidden).length;
+    if (!confirm(`There's no way to recover a forgotten PIN.\n\nYou can erase the PIN AND everything in the private list (${plural(n, 'item')}), then set a new PIN.\n\nErase them?`)) return;
+    data.goals = data.goals.filter((g) => !g.hidden);
+    data.times = data.times.filter((x) => !x.hidden);
+    data.todos = data.todos.filter((x) => !x.hidden);
+    data.lock = null;
+    save();
+    ui.pin = { mode: 'set', entry: '', msg: 'Private list erased. Choose a new PIN.' };
+    render();
   },
 
   // To-do
@@ -1819,6 +2411,8 @@ document.addEventListener('input', (e) => {
   if (t.dataset.draft && drafts[t.dataset.draft]) drafts[t.dataset.draft][t.dataset.field] = t.value;
   if (t.dataset.cf && ui.cardioForm) ui.cardioForm[t.dataset.cf] = t.value;
   if (t.dataset.gf && ui.goalForm) ui.goalForm[t.dataset.gf] = t.value;
+  if (t.dataset.exf && ui.exForm) ui.exForm[t.dataset.exf] = t.value;
+  if (t.dataset.tf && ui.timeForm) ui.timeForm[t.dataset.tf] = t.value;
   if (t.id === 'plan-text') ui.planDraft = t.value;
   if (t.id === 'meal-text') ui.mealDraft = t.value;
 });
@@ -1832,6 +2426,12 @@ document.addEventListener('change', (e) => {
   }
   if (t.dataset.cf && ui.cardioForm) ui.cardioForm[t.dataset.cf] = t.value;
   if (t.dataset.gf && ui.goalForm) ui.goalForm[t.dataset.gf] = t.value;
+  if (t.dataset.exf && ui.exForm) ui.exForm[t.dataset.exf] = t.value;
+  if (t.dataset.tf && ui.timeForm) {
+    ui.timeForm[t.dataset.tf] = t.value;
+    if (t.dataset.tf === 'target') render(); // shows/hides the "No goal time" button
+  }
+  if (t.dataset.timeId) setTimeLog(t.dataset.timeId, t.value);
   if (t.id === 'todo-cat') { ui.todoCat = t.value; saveUi(); }
   if (t.id === 'restore-file' && t.files && t.files[0]) {
     restoreFromFile(t.files[0]);
@@ -1843,10 +2443,14 @@ document.addEventListener('submit', (e) => {
 });
 // Coming back to the app (e.g. after locking the phone): refresh the timer and "today".
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState !== 'visible') return;
+  if (document.visibilityState !== 'visible') {
+    // Leaving the app locks the private list right away.
+    if (unlocked || ui.pin) { lockPrivate(); render(); }
+    return;
+  }
   if (timer.end) keepAwake(true);
   const typing = document.activeElement && ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName);
-  if (!typing && !ui.cardioForm && !ui.goalForm) render();
+  if (!typing && !ui.cardioForm && !ui.goalForm && !ui.exForm && !ui.timeForm) render();
 });
 
 /* ---------- Start up ---------- */

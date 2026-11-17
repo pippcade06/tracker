@@ -414,3 +414,60 @@ textarea.meal-text { min-height: 72px; margin-top: 10px; font-size: 15px; }
 .again-btn { height: 46px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 700; padding: 0 12px; }
 a.btn { color: var(--text); }
 #meals .row > a.btn { flex: 0 0 auto; }
+
+/* ============ v2.2: Swap / add / remove exercises ============ */
+.ex-tag { color: var(--blue); font-size: .85rem; font-weight: 600; margin-top: 3px; }
+.ex-tools { margin-top: 14px; }
+.ex-form { border-color: var(--blue); scroll-margin-top: 12px; }
+.ex-form h3 { margin-bottom: 2px; }
+.add-ex { margin-top: 2px; }
+
+/* ============ v2.2: Times ============ */
+.times { border-color: rgba(96, 165, 250, .45); }
+.time-row { display: flex; align-items: center; gap: 8px; padding: 10px 0; border-top: 1px solid var(--line); margin-top: 8px; }
+.time-row:first-of-type { margin-top: 10px; }
+.time-txt {
+  flex: 1; min-width: 0; text-align: left; background: none; border: 0; padding: 4px 0;
+  display: flex; flex-direction: column; gap: 2px; min-height: 52px; justify-content: center;
+}
+.time-txt b { font-size: 1.05rem; overflow-wrap: anywhere; }
+.edit-ico { color: var(--muted); font-weight: 400; font-size: .85rem; }
+.now-btn { flex: none; min-width: 92px; min-height: 56px; font-size: 1.1rem; font-weight: 800; }
+.time-in {
+  flex: none; width: 112px; height: 56px; border-radius: 12px; border: 1px solid var(--line);
+  background: var(--card2); padding: 0 6px; font-size: 1rem; font-weight: 800; color-scheme: dark; text-align: center;
+}
+.time-in::-webkit-calendar-picker-indicator { display: none; }
+.time-row .icon-btn.small { width: 40px; flex: none; }
+.time-row.ok .time-in { border-color: rgba(52, 211, 153, .7); }
+.time-row.late .time-in { border-color: rgba(251, 191, 36, .8); }
+.time-form { border-top: 1px solid var(--line); margin-top: 10px; padding-top: 12px; scroll-margin-top: 12px; }
+.time-goal { color-scheme: dark; flex: 1; }
+.opts3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.opts3 .opt { text-align: center; padding: 0 6px; }
+.dow-row { display: grid; grid-template-columns: repeat(7, 1fr); gap: 5px; margin-top: 8px; }
+.dow-row .rir { padding: 0; font-size: .9rem; }
+.times details.ended { margin-top: 10px; }
+
+/* ============ v2.2: Private list & PIN pad ============ */
+.lock-spot { display: flex; justify-content: flex-end; margin-top: 18px; }
+.lock-btn {
+  width: 44px; height: 44px; border: 0; background: none; font-size: 1rem;
+  opacity: .22; filter: grayscale(1); border-radius: 50%;
+}
+.lock-btn:active { opacity: .6; }
+.priv-head .btn { flex: none; min-height: 44px; padding: 0 18px; }
+.pin-wrap { text-align: center; padding: 14px 0 8px; max-width: 360px; margin: 0 auto; }
+.pin-ico { font-size: 2.2rem; }
+.pin-msg { min-height: 2.6em; margin: 8px 12px; }
+.pin-dots { display: flex; justify-content: center; gap: 18px; margin: 6px 0 22px; }
+.pin-dots i { width: 16px; height: 16px; border-radius: 50%; border: 2px solid var(--muted); }
+.pin-dots i.on { background: var(--accent); border-color: var(--accent); }
+.pin-pad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.pin-key {
+  height: 72px; border-radius: 18px; border: 1px solid var(--line); background: var(--card2);
+  font-size: 1.7rem; font-weight: 700;
+}
+.pin-key:active { background: var(--line); }
+.pin-key.fn { font-size: 1rem; color: var(--muted); background: none; }
+.ex-form .rir, .dow-row .rir { min-width: 0; padding: 0; font-size: .95rem; }
