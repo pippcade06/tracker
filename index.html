@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#0b1220">
+  <meta name="theme-color" content="#0e0e12">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -13,6 +13,17 @@
   <link rel="icon" href="icons/icon-192.png">
   <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
   <link rel="stylesheet" href="styles.css">
+  <script>
+    // Apply your chosen look (More → Look) before the page draws, so it never flashes.
+    (function () {
+      var look = {};
+      try { look = JSON.parse(localStorage.getItem('tracker.look')) || {}; } catch (e) {}
+      var t = look.theme === 'light' || look.theme === 'dark' ? look.theme
+        : (window.matchMedia && matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+      document.documentElement.dataset.theme = t;
+      if (look.accent && look.accent !== 'violet') document.documentElement.dataset.accent = look.accent;
+    })();
+  </script>
 </head>
 <body>
   <!-- Each tab's screen is drawn into <main> by app.js -->
@@ -34,11 +45,11 @@
 
   <!-- Bottom tab bar -->
   <nav class="tabbar">
-    <button data-action="tab" data-tab="train"><span class="ico">🏋️</span><span>Train</span></button>
-    <button data-action="tab" data-tab="check"><span class="ico">✅</span><span>Checklist</span></button>
-    <button data-action="tab" data-tab="goals"><span class="ico">🎯</span><span>Goals</span></button>
-    <button data-action="tab" data-tab="progress"><span class="ico">📈</span><span>Progress</span></button>
-    <button data-action="tab" data-tab="more"><span class="ico">⚙️</span><span>More</span></button>
+    <button data-action="tab" data-tab="train"><span class="ico"><svg viewBox="0 0 24 24"><path d="M6.5 6.5v11M3.5 9v6M17.5 6.5v11M20.5 9v6M6.5 12h11"/></svg></span><span>Train</span></button>
+    <button data-action="tab" data-tab="check"><span class="ico"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m8 12.5 2.8 2.8 5.2-5.8"/></svg></span><span>Checklist</span></button>
+    <button data-action="tab" data-tab="goals"><span class="ico"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1"/></svg></span><span>Goals</span></button>
+    <button data-action="tab" data-tab="progress"><span class="ico"><svg viewBox="0 0 24 24"><path d="M4 20h16"/><path d="m4.5 15.5 5-5.5 4 3.5 6-7"/></svg></span><span>Progress</span></button>
+    <button data-action="tab" data-tab="more"><span class="ico"><svg viewBox="0 0 24 24"><circle cx="5.5" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="18.5" cy="12" r="1.2"/></svg></span><span>More</span></button>
   </nav>
 
   <div id="toast" class="toast" role="status"></div>

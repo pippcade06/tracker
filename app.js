@@ -1,6 +1,6 @@
 'use strict';
 /* =====================================================================
-   Goals & Training Tracker — version 2.2
+   Goals & Training Tracker — version 2.3
    Everything is stored on this device (browser "localStorage").
    Sections:  1 settings · 2 helpers · 3 storage · 4 plan import
               5 training · 6 cardio · 7 rest timer · 8 checklist
@@ -9,15 +9,20 @@
    ===================================================================== */
 
 /* ---------- 1. Settings ---------- */
-const APP_VERSION = '2.2.0';
+const APP_VERSION = '2.3.0';
 const STORE_KEY = 'tracker.data.v1'; // (name kept from v1 so your data carries over)
 const UI_KEY = 'tracker.ui.v1';
 const BACKUP_KEY = 'tracker.lastBackup';
+const LOOK_KEY = 'tracker.look'; // light/dark and highlight color (per device)
+const ACCENTS = [
+  { id: 'violet', label: 'Violet', color: '#7c6cf6' },
+  { id: 'blue', label: 'Blue', color: '#3b82f6' },
+  { id: 'teal', label: 'Teal', color: '#14b8a6' },
+  { id: 'orange', label: 'Orange', color: '#f97316' },
+  { id: 'pink', label: 'Pink', color: '#ec4899' },
+];
 const TABS = ['train', 'check', 'goals', 'progress', 'more'];
 const CATEGORIES = ['Training', 'School', 'Work', 'Side projects', 'Personal'];
-const TARGETS = { steps: 10000, protein: 160, proteinMin: 130, calories: 2500, caloriesLow: 2300 };
-// Your "Meal → Macros" page on claude.ai (it uses your Claude plan to estimate a meal from a photo).
-const MEAL_PAGE_URL = 'https://claude.ai/artifact/1dpDoGbDW6Guqz2TN1gHQz';
 const CARDIO_TYPES = [
   { id: 'bike', label: 'Bike', ico: '🚴' },
   { id: 'row', label: 'Row', ico: '🚣' },
@@ -63,7 +68,6 @@ const num = (v) => { if (v === '' || v === null || v === undefined) return null;
 const show = (v) => (v === undefined ? 'nothing' : String(JSON.stringify(v)).slice(0, 40));
 const sum = (arr) => arr.reduce((a, b) => a + b, 0);
 const plural = (n, word) => `${fmtNum(n)} ${word}${n === 1 ? '' : 's'}`;
-const painColor = (n) => `hsl(${140 - (n - 1) * 15} 70% 55%)`;
 // Clock times are stored as "HH:MM" in 24-hour time, e.g. "08:30" or "21:30".
 const isHM = (s) => typeof s === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(s);
 const hmMin = (s) => Number(s.slice(0, 2)) * 60 + Number(s.slice(3));
@@ -148,7 +152,7 @@ function save() {
 const ui = {
   tab: 'train', planWeek: null, trainDate: null, openEx: null, checkDate: null,
   todoFilter: 'All', todoCat: 'Personal', planDraft: '',
-  cardioForm: null, goalForm: null, sumWeek: null, mealBox: false, mealDraft: '',
+  cardioForm: null, goalForm: null, sumWeek: null, weighOpen: false,
   exForm: null, timeForm: null, pin: null, privView: false,
 };
 let savedUi = {};
@@ -675,15 +679,8 @@ const cardioIco = (type) => (CARDIO_TYPES.find((t) => t.id === norm(type)) || CA
 function cardioLine(c) {
   let s = `${cap(c.type)} ${fmtNum(c.minutes)} min`;
   if (c.distance != null) s += `, ${fmtNum(c.distance)} ${c.unit || 'mi'}`;
-  if (c.painBefore != null || c.painAfter != null) s += `, back pain ${c.painBefore ?? '–'}→${c.painAfter ?? '–'}`;
   return s;
 }
-const painWorse = (c) => c.painAfter != null && (c.painAfter > 3 || (c.painBefore != null && c.painAfter > c.painBefore));
-
-function painButtons(action, which, value) {
-  return `<div class="pain-row">${[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => `<button class="pain ${value === n ? 'active' : ''}" style="--c:${painColor(n)}" data-action="${action}" data-which="${which}" data-n="${n}" aria-label="Pain ${n} of 10">${n}</button>`).join('')}</div>`;
-}
-
 function renderCardioSection(day) {
   const logged = cardioFor(day.date);
   const form = ui.cardioForm && ui.cardioForm.date === day.date ? ui.cardioForm : null;
@@ -708,7 +705,6 @@ function renderCardioSection(day) {
     <div class="plan-row">
       <div>
         <b>${cardioIco(c.type)} ${esc(cap(c.type))}</b> · ${fmtNum(c.minutes)} min${c.distance != null ? ` · ${fmtNum(c.distance)} ${esc(c.unit)}` : ''}
-        ${c.painBefore != null || c.painAfter != null ? `<div class="small ${painWorse(c) ? 'warn-text' : 'muted'}">${painWorse(c) ? '⚠️ ' : ''}Back pain ${c.painBefore ?? '–'} → ${c.painAfter ?? '–'}</div>` : ''}
         ${c.notes ? `<div class="muted small">${esc(c.notes)}</div>` : ''}
       </div>
       <button class="icon-btn small danger" data-action="cardio-del" data-id="${c.id}" aria-label="Delete cardio">✕</button>
@@ -735,8 +731,6 @@ function renderCardioForm(f) {
       <input class="num sm" id="cf-dist" type="number" inputmode="decimal" step="any" min="0" data-cf="distance" value="${esc(f.distance)}" placeholder="0">
       <select class="select unit-select" data-cf="unit" aria-label="Distance unit">${DIST_UNITS.map((u) => `<option ${u === f.unit ? 'selected' : ''}>${u}</option>`).join('')}</select>
     </div>
-    <span class="field-label">Back pain before</span>${painButtons('cf-pain', 'painBefore', f.painBefore)}
-    <span class="field-label">Back pain after</span>${painButtons('cf-pain', 'painAfter', f.painAfter)}
     <label class="field-label" for="cf-notes">Notes (optional)</label>
     <input class="text" id="cf-notes" type="text" data-cf="notes" value="${esc(f.notes)}" placeholder="e.g. felt easy, could talk the whole time" autocomplete="off" maxlength="200">
     <div class="row">
@@ -751,7 +745,7 @@ function openCardioForm(date, type, minutes) {
   const r = parseRange(minutes || '');
   ui.cardioForm = {
     date, type: t, minutes: r ? String(r.lo) : '', distance: '', unit: t === 'swim' ? 'yd' : 'mi',
-    painBefore: dayRec(date).backPain ?? null, painAfter: null, notes: '',
+    notes: '',
   };
   render();
   const f = $('#cardio-form');
@@ -767,14 +761,13 @@ function saveCardio() {
   const entry = {
     id: uid(), date: f.date, type: f.type, minutes: m,
     distance: dist !== null && dist > 0 ? dist : null, unit: f.unit,
-    painBefore: f.painBefore, painAfter: f.painAfter, notes: String(f.notes || '').trim(), ts: Date.now(),
+    notes: String(f.notes || '').trim(), ts: Date.now(),
   };
   data.cardio.push(entry);
   save();
   ui.cardioForm = null;
   render();
-  if (painWorse(entry)) toast('Saved. Your back felt worse after. Mention it to your coach.', { ms: 4500 });
-  else toast('Cardio saved ✓');
+  toast('Cardio saved ✓');
 }
 
 /* ---------- 7. Rest timer ---------- */
@@ -891,7 +884,8 @@ function setDaily(date, field, value) {
   if (!Object.keys(r).length) delete data.daily[date];
   save();
 }
-const isBuiltIn = (text) => /10,?000\s*steps/i.test(text) || /back pain/i.test(text);
+// Plan items the app handles itself (or that you turned off), so they don't show twice.
+const isBuiltIn = (text) => /10,?000\s*steps|back pain|weigh|waist|protein|calorie/i.test(text);
 function planChecklist(date) {
   const pd = planDayFor(date);
   return pd ? pd.checklist.filter((x) => !isBuiltIn(x)) : [];
@@ -899,190 +893,55 @@ function planChecklist(date) {
 function checklistItems(date) {
   const r = dayRec(date);
   const checks = r.checks || {};
-  return [
-    !!r.steps,
-    (r.protein || 0) >= TARGETS.proteinMin,
-    (r.calories || 0) > 0,
-    r.weight != null,
-    r.waist != null,
-    r.backPain != null,
-    ...planChecklist(date).map((x) => !!checks[x]),
-  ];
+  return [!!r.steps, ...planChecklist(date).map((x) => !!checks[x])];
 }
 function weekAvg(field, mon) {
   const vals = weekDates(mon).map((d) => dayRec(d)[field]).filter((v) => v != null && v !== 0);
   return vals.length ? { avg: sum(vals) / vals.length, n: vals.length } : null;
 }
-function weightAvg(date) {
-  const vals = [];
-  for (let i = 0; i < 7; i++) {
-    const r = data.daily[addDays(date, -i)];
-    if (r && r.weight != null) vals.push(r.weight);
+// Your most recent weigh-ins, newest first (looks back up to 60 days).
+function recentWeights(date, days = 60) {
+  const out = [];
+  for (let i = 0; i < days; i++) {
+    const d = addDays(date, -i);
+    const r = data.daily[d];
+    if (r && r.weight != null) out.push({ date: d, weight: r.weight });
   }
-  return vals.length ? { avg: sum(vals) / vals.length, n: vals.length } : null;
+  return out;
 }
 
 function summaryHtml(date) {
   const items = checklistItems(date);
   const n = items.filter(Boolean).length;
   const all = n === items.length;
-  return `<div class="row-between"><b>${n} of ${items.length} done</b><span class="muted small">${all ? 'All done 🎉' : ''}</span></div>
-    <div class="bar ${all ? 'ok' : ''}"><i style="width:${(n / items.length) * 100}%"></i></div>`;
-}
-function statHead(field, date) {
-  const r = dayRec(date);
-  if (field === 'protein') {
-    const p = r.protein || 0;
-    return `<div class="row-between"><b>Protein</b><span><b>${fmtNum(p)}</b> / ${TARGETS.protein} g</span></div>
-      <div class="bar ${p >= TARGETS.proteinMin ? 'ok' : ''}"><i style="width:${Math.min(100, (p / TARGETS.protein) * 100)}%"></i></div>`;
-  }
-  if (field === 'calories') {
-    const c = r.calories || 0;
-    return `<div class="row-between"><b>Calories</b><span><b>${c.toLocaleString()}</b> / ~${TARGETS.calories.toLocaleString()}</span></div>
-      <div class="bar ${c >= TARGETS.caloriesLow ? 'ok' : ''}"><i style="width:${Math.min(100, (c / TARGETS.calories) * 100)}%"></i></div>`;
-  }
-  if (field === 'weight') {
-    const a = weightAvg(date);
-    return `<div class="row-between"><b>Weigh-in</b><span class="muted small">${a ? `7-day avg <b>${fmtNum(a.avg)} lb</b> (${a.n})` : 'Morning, after the bathroom'}</span></div>`;
-  }
-  if (field === 'waist') return '<div class="row-between"><b>Waist</b><span class="muted small">At the belly button, relaxed</span></div>';
-  return '';
-}
-function patchChecklist() {
-  const date = ui.checkDate || todayKey();
-  const s = $('#check-summary');
-  if (s) s.innerHTML = summaryHtml(date);
-  document.querySelectorAll('[data-head]').forEach((el) => { el.innerHTML = statHead(el.dataset.head, date); });
-}
-
-/* Meals: each meal adds its protein and calories to the day's totals above. */
-const round1 = (x) => Math.round(x * 10) / 10;
-const mealsFor = (date) => (Array.isArray(dayRec(date).foods) ? dayRec(date).foods : [])
-  .filter((m) => m && typeof m === 'object' && m.id && typeof m.name === 'string');
-const mealMacros = (m) => `${fmtNum(m.protein || 0)} g protein · ${Math.round(m.calories || 0).toLocaleString()} cal${m.carbs != null ? ` · ${fmtNum(m.carbs)} g carbs` : ''}${m.fat != null ? ` · ${fmtNum(m.fat)} g fat` : ''}`;
-
-// Reads lines like "MEAL: Eggs & rice | 520 cal | 23 g protein | 46 g carbs | 27 g fat".
-// Also understands looser typing, e.g. "chicken thighs 30g protein 350 cal". One meal per line.
-function parseMeals(text) {
-  const out = [];
-  for (let line of String(text || '').split(/\r?\n/)) {
-    line = line.replace(/(\d),(\d{3})\b/g, '$1$2').trim();
-    if (!line) continue;
-    const grab = (...res) => {
-      for (const re of res) { const m = line.match(re); if (m) return Number(m[1]); }
-      return null;
-    };
-    const N = '(\\d+(?:\\.\\d+)?)';
-    const calories = grab(new RegExp(`${N}\\s*(?:k?cals?|kcal|calories)\\b`, 'i'), new RegExp(`(?:calories|cals?)\\s*[:=]?\\s*${N}`, 'i'));
-    const protein = grab(new RegExp(`${N}\\s*g?\\s*(?:of\\s+)?protein`, 'i'), new RegExp(`protein\\s*[:=]?\\s*${N}`, 'i'));
-    if (calories == null && protein == null) continue;
-    const carbs = grab(new RegExp(`${N}\\s*g?\\s*(?:of\\s+)?carb(?:s|ohydrates?)?`, 'i'), new RegExp(`carb(?:s|ohydrates?)?\\s*[:=]?\\s*${N}`, 'i'));
-    const fat = grab(new RegExp(`${N}\\s*g?\\s*(?:of\\s+)?fats?\\b`, 'i'), new RegExp(`fats?\\s*[:=]?\\s*${N}`, 'i'));
-    let name = line.replace(/^\W*meal\s*:\s*/i, '');
-    name = name.includes('|') ? name.split('|')[0] : name.split(/\d/)[0];
-    name = name.replace(/[\s,:;|–—-]+$/g, '').replace(/^[\s,:;|–—-]+/g, '').trim().slice(0, 40);
-    if (!name || /^(protein|calories|cals?|kcal|carbs?|fats?)\b/i.test(name)) name = 'Meal';
-    out.push({ name, protein: protein ?? 0, calories: calories ?? 0, carbs, fat });
-  }
-  return out;
-}
-
-function addMeals(date, meals) {
-  const r = data.daily[date] || (data.daily[date] = {});
-  const foods = Array.isArray(r.foods) ? r.foods : (r.foods = []);
-  for (const m of meals) {
-    foods.push({ id: uid(), name: m.name, protein: m.protein || 0, calories: m.calories || 0, carbs: m.carbs ?? null, fat: m.fat ?? null, ts: Date.now() });
-    r.protein = round1((r.protein || 0) + (m.protein || 0));
-    r.calories = Math.round((r.calories || 0) + (m.calories || 0));
-  }
-  save();
-}
-
-function removeMeal(date, id) {
-  const r = data.daily[date];
-  if (!r || !Array.isArray(r.foods)) return;
-  const i = r.foods.findIndex((m) => m.id === id);
-  if (i === -1) return;
-  const [m] = r.foods.splice(i, 1);
-  r.protein = Math.max(0, round1((r.protein || 0) - (m.protein || 0)));
-  r.calories = Math.max(0, Math.round((r.calories || 0) - (m.calories || 0)));
-  if (!r.foods.length) delete r.foods;
-  if (!r.protein) delete r.protein;
-  if (!r.calories) delete r.calories;
-  if (!Object.keys(r).length) delete data.daily[date];
-  save();
-  render();
-  toast(`Removed ${m.name}`, {
-    undo: () => {
-      const rr = data.daily[date] || (data.daily[date] = {});
-      (rr.foods || (rr.foods = [])).splice(i, 0, m);
-      rr.protein = round1((rr.protein || 0) + (m.protein || 0));
-      rr.calories = Math.round((rr.calories || 0) + (m.calories || 0));
-      save();
-      render();
-    },
-  });
-}
-
-// Meals from the last 3 weeks, newest first, one per name, for one-tap "eat it again".
-function recentMeals(date) {
-  const seen = new Set();
-  const out = [];
-  for (let i = 0; i <= 21 && out.length < 6; i++) {
-    const d = addDays(date, -i);
-    for (const m of mealsFor(d).slice().reverse()) {
-      const k = norm(m.name);
-      if (seen.has(k)) continue;
-      seen.add(k);
-      out.push(m);
-      if (out.length >= 6) break;
-    }
-  }
-  return out;
-}
-
-function addMealsFromText(text) {
-  const meals = parseMeals(text);
-  if (!meals.length) {
-    toast('No numbers found. Paste the line from Meal → Macros, or type e.g. "chicken 30 g protein 350 cal".', { ms: 5000 });
-    return false;
-  }
-  addMeals(today(), meals);
-  ui.mealBox = false;
-  ui.mealDraft = '';
-  render();
-  const p = sum(meals.map((m) => m.protein || 0));
-  const c = sum(meals.map((m) => m.calories || 0));
-  toast(`Added ${meals.length === 1 ? meals[0].name : plural(meals.length, 'meal')}: +${fmtNum(p)} g protein, +${Math.round(c).toLocaleString()} cal`);
-  return true;
-}
-
-function renderMeals(date) {
-  const meals = mealsFor(date);
-  const recent = recentMeals(date);
-  const totP = sum(meals.map((m) => m.protein || 0));
-  const totC = sum(meals.map((m) => m.calories || 0));
-  let h = `<div class="card" id="meals">
-    <div class="row-between"><b>🍽 Meals</b><span class="muted small">${meals.length ? `${fmtNum(totP)} g · ${Math.round(totC).toLocaleString()} cal` : 'Adds to protein & calories'}</span></div>`;
-  if (meals.length) {
-    h += `<div class="meal-list">${meals.map((m) => `<div class="meal-row">
-        <div class="meal-txt"><b>${esc(m.name)}</b><div class="muted small">${mealMacros(m)}</div></div>
-        <button class="icon-btn small danger" data-action="meal-del" data-id="${esc(m.id)}" aria-label="Remove ${esc(m.name)}">✕</button>
-      </div>`).join('')}</div>`;
-  }
-  h += `<div class="row">
-      <a class="btn" href="${MEAL_PAGE_URL}" target="_blank" rel="noopener">📷 Photo</a>
-      <button class="btn primary" data-action="meal-paste">📋 Paste meal</button>
+  return `<div class="ring-row">
+      <div class="ring ${all ? 'ok' : ''}" style="--p:${(n / items.length) * 100}"><span>${n}/${items.length}</span></div>
+      <div><b class="ring-title">${all ? 'All done 🎉' : n === 0 ? 'Let\'s get going' : 'Keep it up'}</b>
+        <div class="muted small">${n} of ${items.length} done today</div></div>
     </div>`;
-  if (ui.mealBox) {
-    h += `<textarea id="meal-text" class="meal-text" rows="2" spellcheck="false" autocapitalize="off" placeholder="Paste here, or type: chicken thighs 30 g protein 350 cal">${esc(ui.mealDraft || '')}</textarea>
-      <div class="row"><button class="btn" data-action="meal-cancel">Cancel</button><button class="btn primary" data-action="meal-add">Add</button></div>`;
+}
+
+function renderWeighIn(date) {
+  const r = dayRec(date);
+  const recent = recentWeights(date);
+  const week = recent.filter((w) => w.date > addDays(date, -7));
+  const avg = week.length ? sum(week.map((w) => w.weight)) / week.length : null;
+  const last = recent.find((w) => w.date !== date);
+  let h = `<div class="card weigh" id="weigh">
+    <div class="row-between"><b>⚖️ Weigh-in <span class="muted small">(optional)</span></b>
+      <span class="muted small">${avg != null ? `7-day avg <b>${fmtNum(avg)} lb</b>` : ''}</span></div>`;
+  if (ui.weighOpen) {
+    h += `<div class="quick">
+        <input class="num sm" id="weigh-in" type="number" inputmode="decimal" step="any" min="0" value="${r.weight ?? ''}" placeholder="${last ? fmtNum(last.weight) : '165.0'}" aria-label="Weight in pounds">
+        <span class="unit">lb</span>
+        <button class="btn primary" data-action="weigh-save">Save</button>
+      </div>
+      <div class="row"><button class="btn" data-action="weigh-cancel">Cancel</button>${r.weight != null ? '<button class="btn danger" data-action="weigh-clear">Remove</button>' : ''}</div>`;
+  } else if (r.weight != null) {
+    h += `<button class="weigh-val" data-action="weigh-open"><b>${fmtNum(r.weight)}</b> lb <span class="muted small">· tap to change</span></button>`;
   } else {
-    h += '<button class="link-btn" data-action="meal-type">or type one in</button>';
-  }
-  if (recent.length) {
-    h += `<div class="muted small" style="margin-top:6px">Eat it again:</div><div class="again">${recent.map((m) => `
-      <button class="chip-btn again-btn" data-action="meal-again" data-id="${esc(m.id)}">+ ${esc(m.name)} <span class="muted">${fmtNum(m.protein || 0)} g</span></button>`).join('')}</div>`;
+    h += `<button class="btn full" data-action="weigh-open">+ Log my weight</button>
+      <div class="muted small" style="margin-top:6px">${last ? `Last: ${fmtNum(last.weight)} lb (${relDay(last.date)})` : 'Whenever you get the chance. Morning, after the bathroom, is most consistent.'}</div>`;
   }
   return `${h}</div>`;
 }
@@ -1092,8 +951,6 @@ function renderChecklist() {
   const date = ui.checkDate || t;
   const r = dayRec(date);
   const checks = r.checks || {};
-  const numBox = (field, mode, ph) => `<input class="num sm" type="number" inputmode="${mode}" step="any" min="0" data-daily="${field}" value="${r[field] ?? ''}" placeholder="${ph}" aria-label="${field}">`;
-  const adds = (field, list) => list.map((n) => `<button class="chip-btn" data-action="add-daily" data-field="${field}" data-by="${n}">+${n}</button>`).join('');
   const checkRow = (on, attrs, label) => `<button class="check-row ${on ? 'on' : ''}" ${attrs}><span class="box">${on ? '✓' : ''}</span><span>${label}</span></button>`;
 
   let h = `<section class="date-nav">
@@ -1102,44 +959,9 @@ function renderChecklist() {
     <button class="icon-btn" data-action="check-day" data-by="1" ${date >= t ? 'disabled' : ''} aria-label="Next day">›</button>
   </section>
   <div class="card" id="check-summary">${summaryHtml(date)}</div>
-
-  ${checkRow(!!r.steps, 'data-action="toggle-daily" data-field="steps"', 'Walk 10,000 steps')}
-
-  ${renderMeals(date)}
-
-  <div class="card">
-    <div data-head="protein">${statHead('protein', date)}</div>
-    <div class="quick">${numBox('protein', 'decimal', 'grams')}${adds('protein', [10, 20, 30])}</div>
-    <div class="muted small" style="margin-top:6px">130 g minimum is OK. Egg ≈ 6 g · cup of milk ≈ 8 g · 4 oz chicken ≈ 28 g</div>
-  </div>
-
-  <div class="card">
-    <div data-head="calories">${statHead('calories', date)}</div>
-    <div class="quick">${numBox('calories', 'numeric', 'calories')}${adds('calories', [100, 250, 500])}</div>
-    <div class="muted small" style="margin-top:6px">2,300–2,400 on lighter training days</div>
-  </div>
-
-  <div class="card">
-    <div data-head="weight">${statHead('weight', date)}</div>
-    <div class="quick">${numBox('weight', 'decimal', '165.0')}<span class="unit">lb</span></div>
-  </div>
-
-  <div class="card">
-    <div data-head="waist">${statHead('waist', date)}</div>
-    <div class="quick">${numBox('waist', 'decimal', '32.0')}<span class="unit">in</span></div>
-  </div>
-
-  <div class="card">
-    <div class="row-between"><b>Back pain today</b><span>${r.backPain != null ? `<b>${r.backPain}</b>/10` : 'not set'}</span></div>
-    ${painButtons('pain', 'backPain', r.backPain)}
-    <div class="muted small" style="margin-top:8px">1 = barely notice it · 10 = worst ever. Tap again to clear.</div>
-  </div>`;
-
-  const extra = planChecklist(date);
-  if (extra.length) {
-    h += '<h4 class="section-label">From this week\'s plan</h4>';
-    h += extra.map((x) => checkRow(!!checks[x], `data-action="toggle-check" data-text="${esc(x)}"`, esc(x))).join('');
-  }
+  ${checkRow(!!r.steps, 'data-action="toggle-daily" data-field="steps"', 'Walk 10,000 steps')}`;
+  h += planChecklist(date).map((x) => checkRow(!!checks[x], `data-action="toggle-check" data-text="${esc(x)}"`, esc(x))).join('');
+  h += renderWeighIn(date);
   return h;
 }
 
@@ -1599,22 +1421,7 @@ function weekSummary(mon) {
     if (p) { const diff = Math.round((a.avg - p.avg) * 10) / 10; line += ` (last week ${fmtNum(p.avg)}, ${diff >= 0 ? '+' : ''}${fmtNum(diff)})`; }
     L.push(line);
     L.push(`  ${wts.map(([d, w]) => `${dayName(d)} ${fmtNum(w)}`).join(', ')}`);
-  } else L.push('Body weight: no weigh-ins logged');
-  const waists = dates.map((d) => [d, dayRec(d).waist]).filter((x) => x[1] != null);
-  if (waists.length) L.push(`Waist: ${waists.map(([d, w]) => `${dayName(d)} ${fmtNum(w)} in`).join(', ')}`);
-  const pains = pastDates.map((d) => [d, dayRec(d).backPain]);
-  const pv = pains.filter((x) => x[1] != null).map((x) => x[1]);
-  L.push(pv.length
-    ? `Back pain (daily, 1-10): ${pains.map(([d, v]) => `${dayName(d)} ${v ?? '–'}`).join(', ')} (avg ${fmtNum(sum(pv) / pv.length)})`
-    : 'Back pain (daily): not logged');
-
-  // Nutrition & steps
-  const prot = dates.map((d) => dayRec(d).protein).filter((v) => v > 0);
-  const cals = dates.map((d) => dayRec(d).calories).filter((v) => v > 0);
-  L.push(prot.length
-    ? `Protein: avg ${Math.round(sum(prot) / prot.length)} g over ${plural(prot.length, 'logged day')}; ${prot.filter((v) => v >= TARGETS.proteinMin).length} at ${TARGETS.proteinMin} g+, ${prot.filter((v) => v >= TARGETS.protein).length} at ${TARGETS.protein} g+`
-    : 'Protein: not logged');
-  L.push(cals.length ? `Calories: avg ${Math.round(sum(cals) / cals.length).toLocaleString()} over ${plural(cals.length, 'logged day')}` : 'Calories: not logged');
+  } else L.push('Body weight: no weigh-ins this week (weigh-ins are optional)');
   L.push(`10,000 steps: ${pastDates.filter((d) => dayRec(d).steps).length}/${pastDates.length} days`);
   const weekCardio = data.cardio.filter((c) => dates.includes(c.date));
   L.push(`Training: ${plural(dates.filter((d) => data.sets.some((s) => s.date === d)).length, 'lifting day')}, ${plural(weekCardio.length, 'cardio session')} (${fmtNum(sum(weekCardio.map((c) => c.minutes)))} min)`);
@@ -1657,15 +1464,9 @@ function weekSummary(mon) {
     const r = dayRec(d);
     const bits = [];
     if (r.weight != null) bits.push(`weight ${fmtNum(r.weight)}`);
-    if (r.backPain != null) bits.push(`back pain ${r.backPain}/10`);
-    if (r.protein) bits.push(`protein ${fmtNum(r.protein)} g`);
-    if (r.calories) bits.push(`${r.calories.toLocaleString()} cal`);
     if (r.steps) bits.push('10k steps ✓');
-    if (r.waist != null) bits.push(`waist ${fmtNum(r.waist)} in`);
     if (pd && !future) pd.checklist.filter((x) => !isBuiltIn(x)).forEach((x) => bits.push(`${x} ${r.checks && r.checks[x] ? '✓' : '✗'}`));
     if (bits.length) lines.push(`  Daily: ${bits.join(', ')}`);
-    const meals = mealsFor(d);
-    if (meals.length) lines.push(`  Meals: ${meals.map((m) => `${m.name} (${fmtNum(m.protein || 0)} g protein, ${Math.round(m.calories || 0)} cal)`).join('; ')}`);
     if (!lines.length) lines.push(future ? '  (not yet)' : '  (nothing logged)');
     L.push(...lines);
   }
@@ -1771,7 +1572,7 @@ function renderProgress() {
       <div class="week-title"><b>Weekly check-in</b><div class="muted small">${shortDate(mon)} – ${shortDate(addDays(mon, 6))}${mon === thisMon ? ' (this week)' : ''}</div></div>
       <button class="icon-btn" data-action="sum-week" data-by="7" ${mon >= thisMon ? 'disabled' : ''} aria-label="Next week">›</button>
     </div>
-    <p class="muted small">Copies the whole week as text (sets, cardio, back pain, weight, food, goals, times) so you can paste it to your coach on Sunday.</p>
+    <p class="muted small">Copies the whole week as text (sets, cardio, weigh-ins, goals, times) so you can paste it to your coach on Sunday.</p>
     <button class="btn primary big full" data-action="copy-summary">📋 Copy summary for coach</button>
     ${navigator.share ? '<button class="btn full" data-action="share-summary">📤 Share summary…</button>' : ''}
     <details class="preview" id="summary-preview"><summary>Preview the text</summary><pre class="summary-pre">${esc(weekSummary(mon))}</pre></details>
@@ -1802,21 +1603,6 @@ function renderProgress() {
   }
   h += '</div>';
 
-  // Back pain: last 14 days
-  const painDays = [];
-  for (let i = 13; i >= 0; i--) painDays.push(addDays(t, -i));
-  if (painDays.some((d) => dayRec(d).backPain != null)) {
-    const thisW = weekAvg('backPain', thisMon);
-    const lastW = weekAvg('backPain', addDays(thisMon, -7));
-    h += `<div class="section"><h3 class="section-title">Back pain (last 14 days)</h3><div class="card">
-      <div class="pain-strip">${painDays.map((d) => {
-        const v = dayRec(d).backPain;
-        return `<div class="ps"><span class="ps-v" ${v != null ? `style="--c:${painColor(v)}"` : ''}>${v ?? '·'}</span><small>${dayName(d).charAt(0)}${fromKey(d).getDate()}</small></div>`;
-      }).join('')}</div>
-      <div class="muted small" style="margin-top:8px">Average this week: <b>${thisW ? fmtNum(thisW.avg) : '–'}</b> · last week: <b>${lastW ? fmtNum(lastW.avg) : '–'}</b></div>
-    </div></div>`;
-  }
-
   // Exercise history
   const hist = exerciseHistory();
   h += '<div class="section"><h3 class="section-title">Exercise history</h3>';
@@ -1840,10 +1626,50 @@ function renderProgress() {
     const wk = data.cardio.filter((c) => c.date >= thisMon && c.date <= addDays(thisMon, 6));
     h += `<div class="section"><h3 class="section-title">Cardio</h3><div class="card">
       <div class="row-between"><span>This week</span><b>${fmtNum(sum(wk.map((c) => c.minutes)))} min · ${plural(wk.length, 'session')}</b></div>
-      ${cardio.slice(0, 10).map((c) => `<div class="hist-row"><span>${shortDate(c.date)}</span><span class="${painWorse(c) ? 'warn-text' : ''}">${cardioIco(c.type)} ${esc(cardioLine(c))}</span></div>`).join('')}
+      ${cardio.slice(0, 10).map((c) => `<div class="hist-row"><span>${shortDate(c.date)}</span><span>${cardioIco(c.type)} ${esc(cardioLine(c))}</span></div>`).join('')}
     </div></div>`;
   }
   return h;
+}
+
+/* ---------- Look: light/dark and highlight color ---------- */
+function getLook() {
+  let look = {};
+  try { look = JSON.parse(localStorage.getItem(LOOK_KEY)) || {}; } catch (e) { look = {}; }
+  return {
+    theme: ['auto', 'light', 'dark'].includes(look.theme) ? look.theme : 'auto',
+    accent: ACCENTS.some((a) => a.id === look.accent) ? look.accent : 'violet',
+  };
+}
+const darkQuery = window.matchMedia ? matchMedia('(prefers-color-scheme: light)') : null;
+function applyLook() {
+  const look = getLook();
+  const theme = look.theme !== 'auto' ? look.theme : darkQuery && darkQuery.matches ? 'light' : 'dark';
+  const root = document.documentElement;
+  root.dataset.theme = theme;
+  if (look.accent === 'violet') delete root.dataset.accent; else root.dataset.accent = look.accent;
+  // Phone status bar color (Android) matches the strip at the top of the app.
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.content = getComputedStyle(root).getPropertyValue(theme === 'light' ? '--accent' : '--bg').trim() || '#0e0e12';
+}
+function setLook(changes) {
+  try { localStorage.setItem(LOOK_KEY, JSON.stringify({ ...getLook(), ...changes })); } catch (e) { /* ignore */ }
+  applyLook();
+  render();
+}
+if (darkQuery && darkQuery.addEventListener) darkQuery.addEventListener('change', () => { if (getLook().theme === 'auto') applyLook(); });
+
+function renderLook() {
+  const look = getLook();
+  return `<div class="section"><h3 class="section-title">Look</h3>
+    <span class="field-label">Theme</span>
+    <div class="look-opts">${[['auto', 'Auto'], ['light', 'Light'], ['dark', 'Dark']].map(([id, label]) =>
+      `<button class="opt ${look.theme === id ? 'active' : ''}" data-action="look-theme" data-v="${id}">${label}</button>`).join('')}</div>
+    <div class="muted small" style="margin-top:6px">Auto follows your phone's light/dark setting.</div>
+    <span class="field-label">Color</span>
+    <div class="swatches">${ACCENTS.map((a) =>
+      `<button class="swatch ${look.accent === a.id ? 'active' : ''}" style="--sw:${a.color}" data-action="look-accent" data-v="${a.id}" aria-label="${a.label}">${look.accent === a.id ? '✓' : ''}</button>`).join('')}</div>
+  </div>`;
 }
 
 /* ---------- 11. More: import, saved plans, backup ---------- */
@@ -1942,6 +1768,8 @@ function renderMore() {
       <button class="icon-btn small danger" data-action="del-plan" data-week="${p.week}" aria-label="Delete plan">🗑</button>
     </div>`).join('') : '<p class="muted small">None yet.</p>';
   h += '</div>';
+
+  h += renderLook();
 
   h += `<div class="section"><h3 class="section-title">Backup</h3>
     <p class="muted small">Your data lives <b>only on this device</b>. Save a backup file every Sunday. To move data to your laptop (or a new phone), save a backup here and use <b>Restore</b> there.</p>
@@ -2091,12 +1919,6 @@ const actions = {
     f.minutes = fmtNum(Math.max(0, (num(f.minutes) || 0) + Number(el.dataset.by)));
     render();
   },
-  'cf-pain'(el) {
-    const f = ui.cardioForm;
-    const n = Number(el.dataset.n);
-    f[el.dataset.which] = f[el.dataset.which] === n ? null : n;
-    render();
-  },
   'cf-cancel'() { ui.cardioForm = null; render(); },
   'cf-save'() { saveCardio(); },
   'cardio-del'(el) {
@@ -2112,49 +1934,35 @@ const actions = {
   'check-day'(el) {
     const next = addDays(today(), Number(el.dataset.by));
     ui.checkDate = next >= todayKey() ? null : next;
+    ui.weighOpen = false;
     render();
   },
   'toggle-daily'(el) {
     setDaily(today(), el.dataset.field, !dayRec(today())[el.dataset.field]);
     render();
   },
-  'add-daily'(el) {
-    const f = el.dataset.field;
-    setDaily(today(), f, (dayRec(today())[f] || 0) + Number(el.dataset.by));
+  'weigh-open'() {
+    ui.weighOpen = true;
     render();
+    const n = $('#weigh-in');
+    if (n) n.focus();
   },
-  pain(el) {
-    const n = Number(el.dataset.n);
-    setDaily(today(), 'backPain', dayRec(today()).backPain === n ? null : n);
+  'weigh-cancel'() { ui.weighOpen = false; render(); },
+  'weigh-save'() {
+    const v = num(($('#weigh-in') || {}).value);
+    if (v === null || v < 50 || v > 500) { toast('Type your weight in pounds, like 165.4'); return; }
+    setDaily(today(), 'weight', v);
+    ui.weighOpen = false;
     render();
+    toast(`Saved ${fmtNum(v)} lb ✓`);
   },
-  async 'meal-paste'() {
-    let text = '';
-    try { text = await navigator.clipboard.readText(); } catch (e) { text = ''; }
-    if (text && parseMeals(text).length) { addMealsFromText(text); return; }
-    ui.mealBox = true;
+  'weigh-clear'() {
+    const old = dayRec(today()).weight;
+    setDaily(today(), 'weight', null);
+    ui.weighOpen = false;
     render();
-    const ta = $('#meal-text');
-    if (ta) ta.focus();
-    toast(text ? 'That didn\'t look like a meal line. Check it below.' : 'Long-press the box, tap Paste, then tap Add.', { ms: 4500 });
-    if (text && ta) { ta.value = text; ui.mealDraft = text; }
+    toast('Weigh-in removed', { undo: () => { setDaily(today(), 'weight', old); render(); } });
   },
-  'meal-type'() {
-    ui.mealBox = true;
-    render();
-    const ta = $('#meal-text');
-    if (ta) ta.focus();
-  },
-  'meal-cancel'() { ui.mealBox = false; ui.mealDraft = ''; render(); },
-  'meal-add'() { addMealsFromText(($('#meal-text') || {}).value || ''); },
-  'meal-again'(el) {
-    const m = recentMeals(today()).find((x) => x.id === el.dataset.id);
-    if (!m) return;
-    addMeals(today(), [m]);
-    render();
-    toast(`Added ${m.name}: +${fmtNum(m.protein || 0)} g protein, +${Math.round(m.calories || 0).toLocaleString()} cal`);
-  },
-  'meal-del'(el) { removeMeal(today(), el.dataset.id); },
   'toggle-check'(el) {
     const checks = { ...(dayRec(today()).checks || {}) };
     const text = el.dataset.text;
@@ -2389,6 +2197,8 @@ const actions = {
     render();
   },
   'backup-save'() { saveBackupFile(); },
+  'look-theme'(el) { setLook({ theme: el.dataset.v }); },
+  'look-accent'(el) { setLook({ accent: el.dataset.v }); },
   'backup-share'() { shareBackup(); },
   undo() {
     const fn = undoFn;
@@ -2414,16 +2224,10 @@ document.addEventListener('input', (e) => {
   if (t.dataset.exf && ui.exForm) ui.exForm[t.dataset.exf] = t.value;
   if (t.dataset.tf && ui.timeForm) ui.timeForm[t.dataset.tf] = t.value;
   if (t.id === 'plan-text') ui.planDraft = t.value;
-  if (t.id === 'meal-text') ui.mealDraft = t.value;
 });
 // Finished typing in a box (you tapped away) or picked from a list: save it.
 document.addEventListener('change', (e) => {
   const t = e.target;
-  if (t.dataset.daily) {
-    const v = num(t.value);
-    setDaily(today(), t.dataset.daily, v !== null && v >= 0 ? v : null);
-    patchChecklist(); // update the numbers without redrawing the whole screen
-  }
   if (t.dataset.cf && ui.cardioForm) ui.cardioForm[t.dataset.cf] = t.value;
   if (t.dataset.gf && ui.goalForm) ui.goalForm[t.dataset.gf] = t.value;
   if (t.dataset.exf && ui.exForm) ui.exForm[t.dataset.exf] = t.value;
@@ -2437,6 +2241,9 @@ document.addEventListener('change', (e) => {
     restoreFromFile(t.files[0]);
     t.value = '';
   }
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && e.target.id === 'weigh-in') { e.preventDefault(); actions['weigh-save'](); }
 });
 document.addEventListener('submit', (e) => {
   if (e.target.dataset.form === 'todo') { e.preventDefault(); addTodo(); }
@@ -2454,6 +2261,7 @@ document.addEventListener('visibilitychange', () => {
 });
 
 /* ---------- Start up ---------- */
+applyLook();
 if (savedUi.timer && savedUi.timer.end > Date.now() - 90000) {
   Object.assign(timer, savedUi.timer, { alerted: savedUi.timer.end <= Date.now() });
   runTimer();
