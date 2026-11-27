@@ -1,6 +1,6 @@
 'use strict';
 /* =====================================================================
-   Goals & Training Tracker — version 2.3
+   Goals & Training Tracker — version 2.4
    Everything is stored on this device (browser "localStorage").
    Sections:  1 settings · 2 helpers · 3 storage · 4 plan import
               5 training · 6 cardio · 7 rest timer · 8 checklist
@@ -9,7 +9,7 @@
    ===================================================================== */
 
 /* ---------- 1. Settings ---------- */
-const APP_VERSION = '2.3.0';
+const APP_VERSION = '2.4.0';
 const STORE_KEY = 'tracker.data.v1'; // (name kept from v1 so your data carries over)
 const UI_KEY = 'tracker.ui.v1';
 const BACKUP_KEY = 'tracker.lastBackup';
@@ -80,6 +80,7 @@ function blankData() {
   return {
     app: 'goal-tracker', version: 2, plans: {}, sets: [], cardio: [], daily: {}, todos: [], goals: [],
     dayEdits: {}, // v2.2: your swaps/adds/removes per day
+    myBlocks: {}, // v2.4: schedule blocks YOU added, per day (re-importing a plan never touches these)
     times: [],    // v2.2: time goals ("out by 8:30") and what time you actually did it
     lock: null,   // v2.2: scrambled copy of your private-list PIN (never the PIN itself)
   };
@@ -126,6 +127,14 @@ function normalizeData(d) {
       log: isObj(x.log) ? x.log : {},
     }));
   }
+  if (isObj(d.myBlocks)) {
+    for (const [k, v] of Object.entries(d.myBlocks)) {
+      if (!isDateKey(k) || !Array.isArray(v)) continue;
+      const list = v.filter((b) => isObj(b) && b.id && isHM(b.start) && typeof b.label === 'string')
+        .map((b) => ({ id: b.id, start: b.start, end: isHM(b.end) ? b.end : '', label: b.label, locked: b.locked === true }));
+      if (list.length) out.myBlocks[k] = list;
+    }
+  }
   if (isObj(d.lock) && typeof d.lock.hash === 'string' && typeof d.lock.salt === 'string') out.lock = { hash: d.lock.hash, salt: d.lock.salt };
   return out;
 }
@@ -153,7 +162,7 @@ const ui = {
   tab: 'train', planWeek: null, trainDate: null, openEx: null, checkDate: null,
   todoFilter: 'All', todoCat: 'Personal', planDraft: '',
   cardioForm: null, goalForm: null, sumWeek: null, weighOpen: false,
-  exForm: null, timeForm: null, pin: null, privView: false,
+  exForm: null, timeForm: null, pin: null, privView: false, blockForm: null,
 };
 let savedUi = {};
 try { savedUi = JSON.parse(localStorage.getItem(UI_KEY)) || {}; } catch (e) { savedUi = {}; }
@@ -229,6 +238,34 @@ function validatePlanObject(o, warnings = []) {
   if (o.title !== undefined && typeof o.title !== 'string') errors.push('"title" should be text in quotes, like "Back Recovery Week".');
   if (!isList(o.rules)) errors.push('"rules" should be a list in [ ] brackets.');
   const rules = list(o.rules).map(txt).filter(Boolean);
+  // "07:30" (or "7:30") → "07:30"; anything else → null
+  const hm = (v) => {
+    const m = String(v ?? '').trim().match(/^(\d{1,2}):(\d{2})$/);
+    if (!m) return null;
+    const out = `${pad(Number(m[1]))}:${m[2]}`;
+    return isHM(out) ? out : null;
+  };
+  const given = (v) => v !== undefined && v !== null && v !== '';
+  let targets = null;
+  if (given(o.targets)) {
+    if (typeof o.targets !== 'object' || Array.isArray(o.targets)) {
+      errors.push('"targets" should be written as { … }, like {"bedtime": "22:30", "wake": "06:30"}.');
+    } else {
+      targets = {};
+      for (const k of ['calories', 'proteinG', 'weeklyLossLb']) {
+        if (!given(o.targets[k])) continue;
+        const n = Number(o.targets[k]);
+        if (!Number.isFinite(n)) errors.push(`"targets" → "${k}" should be a number (got ${show(o.targets[k])}).`);
+        else targets[k] = n;
+      }
+      for (const k of ['bedtime', 'wake']) {
+        if (!given(o.targets[k])) continue;
+        const v = hm(o.targets[k]);
+        if (!v) errors.push(`"targets" → "${k}" should be a 24-hour time like "22:30" (got ${show(o.targets[k])}).`);
+        else targets[k] = v;
+      }
+    }
+  }
   if (!Array.isArray(o.days) || !o.days.length) errors.push('"days" should be a list in [ ] brackets with at least one day.');
 
   const days = [];
@@ -279,14 +316,34 @@ function validatePlanObject(o, warnings = []) {
     if (!isList(d.checklist)) errors.push(`${where}: "checklist" should be a list in [ ] brackets.`);
     const checklist = list(d.checklist).map(txt).filter(Boolean);
 
+    if (!isList(d.schedule)) errors.push(`${where}: "schedule" should be a list in [ ] brackets (or leave it out).`);
+    const schedule = [];
+    list(d.schedule).forEach((b, j) => {
+      const w = `${where}, schedule block ${j + 1}` + (b && isText(b.label) ? ` (“${b.label.trim()}”)` : '');
+      if (!b || typeof b !== 'object' || Array.isArray(b)) { errors.push(`${w} isn't written as { … }.`); return; }
+      const start = hm(b.start);
+      if (!start) errors.push(`${w}: "start" should be a 24-hour time like "07:30" (got ${show(b.start)}).`);
+      let end = '';
+      if (given(b.end)) {
+        end = hm(b.end);
+        if (!end) errors.push(`${w}: "end" should be a 24-hour time like "08:30" (got ${show(b.end)}), or leave it out.`);
+      }
+      if (!isText(b.label)) errors.push(`${w}: needs a "label", like "Study: Analysis".`);
+      if (given(b.locked) && typeof b.locked !== 'boolean') warnings.push(`${w}: "locked" should be true or false, so it was treated as false.`);
+      schedule.push({ start: start || '', end: end || '', label: txt(b.label), locked: b.locked === true });
+    });
+    schedule.sort((a, b) => (a.start < b.start ? -1 : a.start > b.start ? 1 : 0));
+
+    // "meals" and "mealTotals" from the coach are accepted but not used (you turned meals off).
+
     const type = isText(d.type) ? d.type.trim().toLowerCase() : exercises.length ? 'lift' : cardio.length ? 'cardio' : 'rest';
-    days.push({ date: d.date, name: txt(d.name), type, exercises, cardio, checklist });
+    days.push({ date: d.date, name: txt(d.name), type, exercises, cardio, checklist, schedule });
   });
 
   if (errors.length) return { errors, warnings };
   days.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
   return {
-    plan: { week: o.week, title: isText(o.title) ? o.title.trim() : `Week of ${niceDate(o.week)}`, rules, days },
+    plan: { week: o.week, title: isText(o.title) ? o.title.trim() : `Week of ${niceDate(o.week)}`, rules, days, ...(targets ? { targets } : {}) },
     errors: [],
     warnings,
   };
@@ -893,7 +950,7 @@ function planChecklist(date) {
 function checklistItems(date) {
   const r = dayRec(date);
   const checks = r.checks || {};
-  return [!!r.steps, ...planChecklist(date).map((x) => !!checks[x])];
+  return [!!r.steps, ...planChecklist(date).map((x) => !!checks[x]), ...extrasFor(date).map((x) => !!x.done)];
 }
 function weekAvg(field, mon) {
   const vals = weekDates(mon).map((d) => dayRec(d)[field]).filter((v) => v != null && v !== 0);
@@ -946,22 +1003,152 @@ function renderWeighIn(date) {
   return `${h}</div>`;
 }
 
+/* ---------- 8b. Today's schedule ----------
+   The coach's blocks come from the plan. Blocks you add are saved separately (data.myBlocks),
+   so re-importing the week only replaces the coach's blocks. Check-offs are saved per day. */
+function blocksFor(date) {
+  const pd = planDayFor(date);
+  const coach = (pd && Array.isArray(pd.schedule) ? pd.schedule : []).filter((b) => isHM(b.start))
+    .map((b) => ({ ...b, key: `c|${b.start}|${b.label}`, mine: false }));
+  const mine = (data.myBlocks[date] || []).map((b) => ({ ...b, key: `m|${b.id}`, mine: true }));
+  return [...coach, ...mine].sort((a, b) => (a.start < b.start ? -1 : a.start > b.start ? 1 : a.mine - b.mine));
+}
+const nowMin = () => { const d = new Date(); return d.getHours() * 60 + d.getMinutes(); };
+// Where a block is compared with the clock: 'now', 'past' or 'later'.
+// A block with no end time (like "Evening milk") counts as "now" for 30 minutes.
+function blockState(b, date) {
+  const t = todayKey();
+  if (date < t) return 'past';
+  if (date > t) return 'later';
+  const n = nowMin();
+  const s = hmMin(b.start);
+  if (n < s) return 'later';
+  let e = isHM(b.end) ? hmMin(b.end) : s + 30;
+  if (e <= s) e = 1440; // runs past midnight
+  return n < e ? 'now' : 'past';
+}
+const blockTime = (b) => `${fmtHM(b.start)}${b.end ? ` – ${fmtHM(b.end)}` : ''}`;
+const minsText = (m) => (m < 60 ? `${m} min` : `${Math.floor(m / 60)} h${m % 60 ? ` ${m % 60} min` : ''}`);
+const targetsFor = (date) => { const p = planForWeek(mondayOf(date)); return (p && p.targets) || null; };
+
+function renderNowNext(date) {
+  const bs = blocksFor(date);
+  const tg = targetsFor(date);
+  const bits = tg ? [tg.wake ? `⏰ Wake ${fmtHM(tg.wake)}` : '', tg.bedtime ? `🛏 Bed ${fmtHM(tg.bedtime)}` : '', tg.weeklyLossLb ? `⚖️ −${fmtNum(tg.weeklyLossLb)} lb/week` : ''].filter(Boolean) : [];
+  const tgLine = bits.length ? `<div class="tg-line">${bits.join('<span class="dotsep">·</span>')}</div>` : '';
+  if (date !== todayKey() || !bs.length) return tgLine ? `<div class="card nownext">${tgLine}</div>` : '';
+  const now = bs.filter((b) => blockState(b, date) === 'now').pop() || null;
+  const n = nowMin();
+  const next = bs.find((b) => hmMin(b.start) > n && b !== now) || null;
+  const line = (tag, b, sub) => `<div class="nn-row"><span class="nn-tag ${tag === 'Now' ? 'on' : ''}">${tag}</span>
+    <div class="nn-main"><b>${esc(b.label)}${b.locked ? ' 🔒' : ''}</b><span class="muted small">${sub}</span></div></div>`;
+  let h = '<div class="card nownext">';
+  h += now ? line('Now', now, now.end ? `until ${fmtHM(now.end)}` : `at ${fmtHM(now.start)}`)
+    : '<div class="nn-row"><span class="nn-tag">Now</span><div class="nn-main"><b>Free</b><span class="muted small">Nothing scheduled right now</span></div></div>';
+  h += next ? line('Next', next, `${fmtHM(next.start)} · in ${minsText(hmMin(next.start) - n)}`)
+    : '<div class="nn-row"><span class="nn-tag">Next</span><div class="nn-main"><span class="muted">Nothing else on the schedule today</span></div></div>';
+  return `${h}${tgLine}</div>`;
+}
+
+function blockRow(b, date, done) {
+  const st = blockState(b, date);
+  const on = !!done[b.key];
+  return `<div class="blk ${st} ${on ? 'on' : ''}">
+    <button class="blk-check" data-action="block-toggle" data-key="${esc(b.key)}" aria-label="Mark ${esc(b.label)} done"><span class="box">${on ? '✓' : ''}</span></button>
+    <div class="blk-main">
+      <span class="blk-time">${blockTime(b)}${st === 'now' ? ' <span class="now-tag">NOW</span>' : ''}</span>
+      <b>${esc(b.label)}${b.locked ? ' <span title="Locked">🔒</span>' : ''}</b>
+      ${b.mine ? '<span class="mine-tag">mine</span>' : ''}
+    </div>
+    ${b.mine ? `<button class="icon-btn small" data-action="block-edit" data-id="${esc(b.id)}" aria-label="Edit ${esc(b.label)}">✎</button>` : ''}
+  </div>`;
+}
+
+function renderBlockForm(f) {
+  return `<div class="sub-form" id="block-form">
+    <h3>${f.id ? 'Edit your block' : 'Add a block'}</h3>
+    <label class="field-label" for="bf-label">What</label>
+    <input class="text" id="bf-label" type="text" data-bf="label" value="${esc(f.label)}" placeholder="e.g. DoorDash, Call mom" maxlength="60" autocomplete="off">
+    <div class="two">
+      <div><label class="field-label" for="bf-start">Start</label><input class="text" id="bf-start" type="time" data-bf="start" value="${esc(f.start)}"></div>
+      <div><label class="field-label" for="bf-end">End (optional)</label><input class="text" id="bf-end" type="time" data-bf="end" value="${esc(f.end)}"></div>
+    </div>
+    <span class="field-label">Can it move?</span>
+    <div class="opts3 two-col">
+      <button class="opt ${f.locked ? 'active' : ''}" data-action="bf-locked" data-v="1">🔒 Locked</button>
+      <button class="opt ${!f.locked ? 'active' : ''}" data-action="bf-locked" data-v="0">Flexible</button>
+    </div>
+    <div class="muted small" style="margin-top:6px">Locked = class, work, things you can't move.</div>
+    <div class="row">
+      ${f.id ? '<button class="btn danger" data-action="bf-delete">Delete</button>' : ''}
+      <button class="btn" data-action="bf-cancel">Cancel</button>
+      <button class="btn primary" data-action="bf-save">Save</button>
+    </div>
+  </div>`;
+}
+
+function renderSchedule(date) {
+  const bs = blocksFor(date);
+  const done = dayRec(date).blocks || {};
+  const nDone = bs.filter((b) => done[b.key]).length;
+  const f = ui.blockForm && ui.blockForm.date === date ? ui.blockForm : null;
+  let h = `<div class="card sched" id="sched">
+    <div class="row-between"><b>🗓 Schedule</b><span class="muted small">${bs.length ? `${nDone} of ${bs.length} done` : ''}</span></div>`;
+  if (!bs.length && !f) h += `<p class="muted small">Nothing scheduled${planDayFor(date) ? '' : ' (no plan covers this day)'}. Add your own blocks below.</p>`;
+  h += bs.map((b) => (f && f.id && b.mine && b.id === f.id ? renderBlockForm(f) : blockRow(b, date, done))).join('');
+  h += f && !f.id ? renderBlockForm(f) : '<button class="btn full" data-action="block-new">+ Add a block</button>';
+  return `${h}</div>`;
+}
+
+function saveBlockForm() {
+  const f = ui.blockForm;
+  const label = String(f.label || '').trim();
+  if (!label) { toast('Give the block a name'); return; }
+  if (!isHM(f.start)) { toast('Pick a start time'); return; }
+  if (f.end && !isHM(f.end)) { toast('That end time doesn\'t look right'); return; }
+  const list = data.myBlocks[f.date] || (data.myBlocks[f.date] = []);
+  const fields = { start: f.start, end: f.end || '', label, locked: !!f.locked };
+  if (f.id) {
+    const b = list.find((x) => x.id === f.id);
+    if (b) Object.assign(b, fields);
+  } else list.push({ id: uid(), ...fields });
+  save();
+  ui.blockForm = null;
+  render();
+  toast('Block saved ✓');
+}
+
+/* ---------- 8d. The Today tab ---------- */
+const extrasFor = (date) => (Array.isArray(dayRec(date).extras) ? dayRec(date).extras : []);
+
 function renderChecklist() {
   const t = todayKey();
   const date = ui.checkDate || t;
   const r = dayRec(date);
   const checks = r.checks || {};
-  const checkRow = (on, attrs, label) => `<button class="check-row ${on ? 'on' : ''}" ${attrs}><span class="box">${on ? '✓' : ''}</span><span>${label}</span></button>`;
+  const checkRow = (on, attrs, label, extra = '') => `<div class="check-wrap"><button class="check-row ${on ? 'on' : ''}" ${attrs}><span class="box">${on ? '✓' : ''}</span><span>${label}</span></button>${extra}</div>`;
+  const sub = date === t ? niceDate(date) : date < t ? 'Editing a past day' : 'Upcoming';
 
   let h = `<section class="date-nav">
     <button class="icon-btn" data-action="check-day" data-by="-1" aria-label="Previous day">‹</button>
-    <div class="week-title"><h2>${date === t ? 'Today' : niceDate(date)}</h2><div class="muted small">${date === t ? niceDate(date) : 'Editing a past day'}</div></div>
-    <button class="icon-btn" data-action="check-day" data-by="1" ${date >= t ? 'disabled' : ''} aria-label="Next day">›</button>
-  </section>
-  <div class="card" id="check-summary">${summaryHtml(date)}</div>
-  ${checkRow(!!r.steps, 'data-action="toggle-daily" data-field="steps"', 'Walk 10,000 steps')}`;
+    <div class="week-title"><h2>${date === t ? 'Today' : niceDate(date)}</h2><div class="muted small">${sub}</div></div>
+    <button class="icon-btn" data-action="check-day" data-by="1" ${date >= addDays(t, 13) ? 'disabled' : ''} aria-label="Next day">›</button>
+  </section>`;
+  h += renderNowNext(date);
+  h += renderSchedule(date);
+
+  h += `<h4 class="section-label">Checklist</h4>
+  <div class="card" id="check-summary">${summaryHtml(date)}</div>`;
+  h += checkRow(!!r.steps, 'data-action="toggle-daily" data-field="steps"', 'Walk 10,000 steps');
   h += planChecklist(date).map((x) => checkRow(!!checks[x], `data-action="toggle-check" data-text="${esc(x)}"`, esc(x))).join('');
-  h += renderWeighIn(date);
+  h += extrasFor(date).map((x) => checkRow(!!x.done, `data-action="extra-toggle" data-id="${esc(x.id)}"`, `${esc(x.text)} <span class="mine-tag">just today</span>`,
+    `<button class="icon-btn small" data-action="extra-del" data-id="${esc(x.id)}" aria-label="Remove ${esc(x.text)}">✕</button>`)).join('');
+  h += `<form class="extra-form" data-form="extra">
+      <input class="text" id="extra-text" type="text" placeholder="Add an item just for ${date === t ? 'today' : 'this day'}" maxlength="120" autocomplete="off" enterkeyhint="done" aria-label="New checklist item">
+      <button class="btn" type="submit">Add</button>
+    </form>`;
+
+  if (date <= t) h += renderWeighIn(date);
   return h;
 }
 
@@ -1409,6 +1596,14 @@ function weekSummary(mon) {
   const L = [];
   L.push(`WEEKLY CHECK-IN: ${niceDate(mon)} to ${niceDate(end)}, ${fromKey(end).getFullYear()}`);
   if (plan) L.push(`Plan: ${plan.title}`);
+  const tg = plan && plan.targets;
+  if (tg) {
+    const tb = [];
+    if (tg.weeklyLossLb) tb.push(`lose ${fmtNum(tg.weeklyLossLb)} lb/week`);
+    if (tg.wake) tb.push(`wake ${fmtHM(tg.wake)}`);
+    if (tg.bedtime) tb.push(`bed ${fmtHM(tg.bedtime)}`);
+    if (tb.length) L.push(`Targets: ${tb.join(', ')}`);
+  }
   L.push('(Sets are weight in lb × reps. RIR = reps in reserve. BW = bodyweight.)');
   L.push('');
 
@@ -1418,7 +1613,7 @@ function weekSummary(mon) {
     const a = weekAvg('weight', mon);
     const p = weekAvg('weight', addDays(mon, -7));
     let line = `Body weight: avg ${fmtNum(a.avg)} lb from ${plural(a.n, 'weigh-in')}`;
-    if (p) { const diff = Math.round((a.avg - p.avg) * 10) / 10; line += ` (last week ${fmtNum(p.avg)}, ${diff >= 0 ? '+' : ''}${fmtNum(diff)})`; }
+    if (p) { const diff = Math.round((a.avg - p.avg) * 10) / 10; line += ` (last week ${fmtNum(p.avg)}, ${diff >= 0 ? '+' : ''}${fmtNum(diff)}${tg && tg.weeklyLossLb ? `; target −${fmtNum(tg.weeklyLossLb)}` : ''})`; }
     L.push(line);
     L.push(`  ${wts.map(([d, w]) => `${dayName(d)} ${fmtNum(w)}`).join(', ')}`);
   } else L.push('Body weight: no weigh-ins this week (weigh-ins are optional)');
@@ -1466,7 +1661,13 @@ function weekSummary(mon) {
     if (r.weight != null) bits.push(`weight ${fmtNum(r.weight)}`);
     if (r.steps) bits.push('10k steps ✓');
     if (pd && !future) pd.checklist.filter((x) => !isBuiltIn(x)).forEach((x) => bits.push(`${x} ${r.checks && r.checks[x] ? '✓' : '✗'}`));
+    extrasFor(d).forEach((x) => bits.push(`${x.text} (just that day) ${x.done ? '✓' : '✗'}`));
     if (bits.length) lines.push(`  Daily: ${bits.join(', ')}`);
+    const bs = blocksFor(d);
+    if (bs.length && !future) {
+      const done = r.blocks || {};
+      lines.push(`  Schedule (${bs.filter((b) => done[b.key]).length}/${bs.length} checked off): ${bs.map((b) => `${done[b.key] ? '✓' : '✗'} ${blockTime(b)} ${b.label}${b.locked ? ' [locked]' : ''}${b.mine ? ' (mine)' : ''}`).join('; ')}`);
+    }
     if (!lines.length) lines.push(future ? '  (not yet)' : '  (nothing logged)');
     L.push(...lines);
   }
@@ -1572,7 +1773,7 @@ function renderProgress() {
       <div class="week-title"><b>Weekly check-in</b><div class="muted small">${shortDate(mon)} – ${shortDate(addDays(mon, 6))}${mon === thisMon ? ' (this week)' : ''}</div></div>
       <button class="icon-btn" data-action="sum-week" data-by="7" ${mon >= thisMon ? 'disabled' : ''} aria-label="Next week">›</button>
     </div>
-    <p class="muted small">Copies the whole week as text (sets, cardio, weigh-ins, goals, times) so you can paste it to your coach on Sunday.</p>
+    <p class="muted small">Copies the whole week as text (sets, cardio, schedule, weigh-ins, goals, times) so you can paste it to your coach on Sunday.</p>
     <button class="btn primary big full" data-action="copy-summary">📋 Copy summary for coach</button>
     ${navigator.share ? '<button class="btn full" data-action="share-summary">📤 Share summary…</button>' : ''}
     <details class="preview" id="summary-preview"><summary>Preview the text</summary><pre class="summary-pre">${esc(weekSummary(mon))}</pre></details>
@@ -1732,6 +1933,7 @@ async function restoreFromFile(file) {
   ui.goalForm = null;
   ui.exForm = null;
   ui.timeForm = null;
+  ui.blockForm = null;
   lockPrivate();
   render();
   toast('Backup restored ✓');
@@ -1933,9 +2135,76 @@ const actions = {
   // Checklist
   'check-day'(el) {
     const next = addDays(today(), Number(el.dataset.by));
-    ui.checkDate = next >= todayKey() ? null : next;
+    if (next > addDays(todayKey(), 13)) return;
+    ui.checkDate = next === todayKey() ? null : next;
     ui.weighOpen = false;
+    ui.blockForm = null;
     render();
+  },
+
+  // Schedule blocks
+  'block-toggle'(el) {
+    const done = { ...(dayRec(today()).blocks || {}) };
+    const k = el.dataset.key;
+    if (done[k]) delete done[k]; else done[k] = true;
+    setDaily(today(), 'blocks', Object.keys(done).length ? done : null);
+    render();
+  },
+  'block-new'() {
+    const n = new Date();
+    const start = `${pad(Math.min(23, n.getHours() + 1))}:00`;
+    ui.blockForm = { date: today(), id: null, label: '', start, end: '', locked: false };
+    render();
+    const f = $('#block-form');
+    if (f) f.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    const i = $('#bf-label');
+    if (i) i.focus();
+  },
+  'block-edit'(el) {
+    const b = (data.myBlocks[today()] || []).find((x) => x.id === el.dataset.id);
+    if (!b) return;
+    ui.blockForm = { date: today(), id: b.id, label: b.label, start: b.start, end: b.end, locked: b.locked };
+    render();
+    const f = $('#block-form');
+    if (f) f.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  },
+  'bf-locked'(el) { ui.blockForm.locked = el.dataset.v === '1'; render(); },
+  'bf-cancel'() { ui.blockForm = null; render(); },
+  'bf-save'() { saveBlockForm(); },
+  'bf-delete'() {
+    const f = ui.blockForm;
+    const list = data.myBlocks[f.date] || [];
+    const i = list.findIndex((x) => x.id === f.id);
+    if (i === -1) return;
+    const [removed] = list.splice(i, 1);
+    if (!list.length) delete data.myBlocks[f.date];
+    ui.blockForm = null;
+    save();
+    render();
+    toast(`Deleted ${removed.label}`, {
+      undo: () => { (data.myBlocks[f.date] || (data.myBlocks[f.date] = [])).splice(i, 0, removed); save(); render(); },
+    });
+  },
+
+  // One-off checklist items
+  'extra-toggle'(el) {
+    const x = extrasFor(today()).find((y) => y.id === el.dataset.id);
+    if (!x) return;
+    x.done = !x.done;
+    save();
+    render();
+  },
+  'extra-del'(el) {
+    const list = extrasFor(today());
+    const i = list.findIndex((y) => y.id === el.dataset.id);
+    if (i === -1) return;
+    const date = today();
+    const [removed] = list.splice(i, 1);
+    setDaily(date, 'extras', list.length ? list : null);
+    render();
+    toast('Item removed', {
+      undo: () => { const l = extrasFor(date).slice(); l.splice(i, 0, removed); setDaily(date, 'extras', l); render(); },
+    });
   },
   'toggle-daily'(el) {
     setDaily(today(), el.dataset.field, !dayRec(today())[el.dataset.field]);
@@ -2223,6 +2492,7 @@ document.addEventListener('input', (e) => {
   if (t.dataset.gf && ui.goalForm) ui.goalForm[t.dataset.gf] = t.value;
   if (t.dataset.exf && ui.exForm) ui.exForm[t.dataset.exf] = t.value;
   if (t.dataset.tf && ui.timeForm) ui.timeForm[t.dataset.tf] = t.value;
+  if (t.dataset.bf && ui.blockForm) ui.blockForm[t.dataset.bf] = t.value;
   if (t.id === 'plan-text') ui.planDraft = t.value;
 });
 // Finished typing in a box (you tapped away) or picked from a list: save it.
@@ -2231,6 +2501,7 @@ document.addEventListener('change', (e) => {
   if (t.dataset.cf && ui.cardioForm) ui.cardioForm[t.dataset.cf] = t.value;
   if (t.dataset.gf && ui.goalForm) ui.goalForm[t.dataset.gf] = t.value;
   if (t.dataset.exf && ui.exForm) ui.exForm[t.dataset.exf] = t.value;
+  if (t.dataset.bf && ui.blockForm) ui.blockForm[t.dataset.bf] = t.value;
   if (t.dataset.tf && ui.timeForm) {
     ui.timeForm[t.dataset.tf] = t.value;
     if (t.dataset.tf === 'target') render(); // shows/hides the "No goal time" button
@@ -2247,6 +2518,16 @@ document.addEventListener('keydown', (e) => {
 });
 document.addEventListener('submit', (e) => {
   if (e.target.dataset.form === 'todo') { e.preventDefault(); addTodo(); }
+  if (e.target.dataset.form === 'extra') {
+    e.preventDefault();
+    const input = $('#extra-text');
+    const text = input.value.trim();
+    if (!text) { input.focus(); return; }
+    setDaily(today(), 'extras', [...extrasFor(today()), { id: uid(), text, done: false }]);
+    render();
+    const again = $('#extra-text');
+    if (again) again.focus();
+  }
 });
 // Coming back to the app (e.g. after locking the phone): refresh the timer and "today".
 document.addEventListener('visibilitychange', () => {
@@ -2257,8 +2538,14 @@ document.addEventListener('visibilitychange', () => {
   }
   if (timer.end) keepAwake(true);
   const typing = document.activeElement && ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName);
-  if (!typing && !ui.cardioForm && !ui.goalForm && !ui.exForm && !ui.timeForm) render();
+  if (!typing && !ui.cardioForm && !ui.goalForm && !ui.exForm && !ui.timeForm && !ui.blockForm) render();
 });
+// Keep "Now / Next" on the Today tab current: redraw once a minute (not while you're typing).
+setInterval(() => {
+  if (ui.tab !== 'check' || ui.checkDate || document.visibilityState !== 'visible') return;
+  const typing = document.activeElement && ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName);
+  if (!typing && !ui.blockForm && !ui.weighOpen) render();
+}, 60000);
 
 /* ---------- Start up ---------- */
 applyLook();
